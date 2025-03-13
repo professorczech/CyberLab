@@ -116,7 +116,7 @@ function Install-LabDependencies {
 
     # Install Python packages
     python -m pip install --upgrade pip
-    python -m pip install keyboard paramiko cryptography pyautogui psutil
+    python -m pip install keyboard paramiko cryptography pyautogui psutil pillow zstandard
 
     # Install networking tools
     choco install wireshark nmap -y

