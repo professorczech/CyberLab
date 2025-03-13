@@ -188,6 +188,14 @@ Set-MpPreference -DisableRealtimeMonitoring `$false
 Set-MpPreference -EnableAppControl 1 -EnableNetworkProtection 1
 Remove-MpPreference -ExclusionPath "$labBase\*"
 Get-NetFirewallRule -DisplayName "Lab_*" | Remove-NetFirewallRule
+
+# Restore security settings
+Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
+Remove-SmbShare -Name "VULNERABLE_SHARE" -Force
+
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1
+
+Remove-LocalUser -Name "labuser"
 "@ | Out-File "$labBase\Tools\LabReset.ps1"
 
     # Create network monitor
