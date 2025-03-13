@@ -37,6 +37,7 @@ function Initialize-Lab {
     # Install required system features
     Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart
     Enable-WindowsOptionalFeature -Online -FeatureName Containers -All -NoRestart
+    Enable-WindowsOptionalFeature -Online -FeatureName OpenSSH.Server -All -NoRestart
 }
 
 function Install-LabDependencies {
@@ -55,16 +56,32 @@ function Install-LabDependencies {
 
     # Install networking tools
     choco install wireshark nmap -y
+
+    # Download PsExec for worm tests
+    $webClient = New-Object System.Net.WebClient
+    $webClient.DownloadFile("https://live.sysinternals.com/tools/PsExec.exe", "$labBase\Tools\PsExec.exe")
 }
 
 function Configure-Firewall {
     # Allow lab network traffic
-    New-NetFirewallRule -DisplayName "Lab_TCP" -Direction Inbound -LocalPort 4444,1337,443 -Protocol TCP -Action Allow
-    New-NetFirewallRule -DisplayName "Lab_UDP" -Direction Inbound -LocalPort 4444,1337,443 -Protocol UDP -Action Allow
+    $ports = @(22, 445, 3389, 4444, 1337, 443)
+    New-NetFirewallRule -DisplayName "Lab_TCP" -Direction Inbound -LocalPort $ports -Protocol TCP -Action Allow
+    New-NetFirewallRule -DisplayName "Lab_UDP" -Direction Inbound -LocalPort $ports -Protocol UDP -Action Allow
 
-    # Disable Windows Defender for lab (temporary)
+    # Disable Windows Defender protections
     Set-MpPreference -DisableRealtimeMonitoring $true
-    Write-Host "[!] Windows Defender real-time protection disabled for lab"
+    Set-MpPreference -EnableAppControl 0 -EnableNetworkProtection 0 -DisableRestorePoint $true
+    Set-MpPreference -DisableScriptScanning $true -DisableArchiveScanning $true
+
+    # Add exclusions for lab tools
+    Add-MpPreference -ExclusionPath "$labBase\*"
+    Add-MpPreference -ExclusionProcess "python.exe", "PsExec.exe"
+
+    # Disable SmartScreen
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off"
+    Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppHost" -Name "EnableWebContentEvaluation" -Value 0
+
+    Write-Host "[!] Windows Defender App & Browser Control disabled"
 }
 
 function Create-ExampleFiles {
@@ -95,6 +112,8 @@ function Create-SafetyScripts {
 # Lab Cleanup Script
 Remove-Item -Path "$labBase" -Recurse -Force
 Set-MpPreference -DisableRealtimeMonitoring `$false
+Set-MpPreference -EnableAppControl 1 -EnableNetworkProtection 1
+Remove-MpPreference -ExclusionPath "$labBase\*"
 Get-NetFirewallRule -DisplayName "Lab_*" | Remove-NetFirewallRule
 "@ | Out-File "$labBase\Tools\LabReset.ps1"
 
@@ -122,6 +141,12 @@ Python Version: $(python --version)
 Safety Scripts:
 - LabReset.ps1: $labBase\Tools\LabReset.ps1
 - StartMonitoring.ps1: $labBase\Tools\StartMonitoring.ps1
+
+Additional Configurations:
+- SMB/RDP/SSH ports open
+- Windows Defender App & Browser Control disabled
+- PsExec installed in Tools directory
+- Defender exclusions for lab directory
 
 Next Steps:
 1. Review created files
