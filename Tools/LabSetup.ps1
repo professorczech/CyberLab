@@ -94,7 +94,7 @@ function Create-SafetyScripts {
     @"
 # Lab Cleanup Script
 Remove-Item -Path "$labBase" -Recurse -Force
-Set-MpPreference -DisableRealtimeMonitoring $false
+Set-MpPreference -DisableRealtimeMonitoring `$false
 Get-NetFirewallRule -DisplayName "Lab_*" | Remove-NetFirewallRule
 "@ | Out-File "$labBase\Tools\LabReset.ps1"
 
@@ -114,25 +114,24 @@ try {
     Create-ExampleFiles
 
     Write-Host @"
+=== Lab Setup Complete ===
+Lab Location: $labBase
+Test IP: $testIP
+Python Version: $(python --version)
 
-    === Lab Setup Complete ===
-    Lab Location: $labBase
-    Test IP: $testIP
-    Python Version: $(python --version)
+Safety Scripts:
+- LabReset.ps1: $labBase\Tools\LabReset.ps1
+- StartMonitoring.ps1: $labBase\Tools\StartMonitoring.ps1
 
-    Safety Scripts:
-    - LabReset.ps1: $labBase\Tools\LabReset.ps1
-    - StartMonitoring.ps1: $labBase\Tools\StartMonitoring.ps1
+Next Steps:
+1. Review created files
+2. Test Python environments
+3. Start monitoring script
+4. Begin controlled experiments
 
-    Next Steps:
-    1. Review created files
-    2. Test Python environments
-    3. Start monitoring script
-    4. Begin controlled experiments
-
-    WARNING: This environment is intentionally vulnerable!
-    Do NOT use for real systems or sensitive data.
-    "@
+WARNING: This environment is intentionally vulnerable!
+Do NOT use for real systems or sensitive data.
+"@
 }
 catch {
     Write-Host "Error during setup: $_"
