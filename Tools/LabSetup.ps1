@@ -47,6 +47,61 @@ function Initialize-Lab {
     catch {
         Write-Warning "OpenSSH Server installation failed: $_"
     }
+
+    # Create vulnerable test user
+    $password = ConvertTo-SecureString "Password123" -AsPlainText -Force
+    New-LocalUser -Name "labuser" -Password $password -Description "Vulnerable Lab Account"
+    Add-LocalGroupMember -Group "Administrators" -Member "labuser"
+    Add-LocalGroupMember -Group "Remote Desktop Users" -Member "labuser"
+}
+
+function Configure-SSH-Vulnerabilities {
+    # Install and configure vulnerable SSH
+    Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+
+    # Create vulnerable SSH config
+    $sshdConfig = @"
+Port 22
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords yes
+ChallengeResponseAuthentication no
+UsePAM yes
+AllowTcpForwarding yes
+X11Forwarding yes
+"@
+    Set-Content -Path "$env:ProgramData\ssh\sshd_config" -Value $sshdConfig
+
+    # Restart SSH service
+    Restart-Service sshd
+}
+
+function Configure-SMB-Vulnerabilities {
+    # Enable insecure SMB protocols
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "SMB1" -Type DWORD -Value 1 -Force
+
+    # Create vulnerable share
+    New-SmbShare -Name "VULNERABLE_SHARE" -Path "C:\Vulnerable" -FullAccess "Everyone"
+
+    # Set insecure permissions
+    icacls "C:\Vulnerable" /grant "Everyone:(OI)(CI)F"
+
+    # Disable SMB security
+    Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force
+    Set-SmbServerConfiguration -RequireSecuritySignature $false -Force
+    Set-SmbServerConfiguration -EnableInsecureGuestLogons $true -Force
+}
+
+function Configure-RDP-Vulnerabilities {
+    # Enable RDP with weak security
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
+
+    # Lower encryption level
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MinEncryptionLevel" -Value 1
+
+    # Allow saved credentials
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "DisableDomainCreds" -Value 0
 }
 
 function Install-LabDependencies {
@@ -91,6 +146,15 @@ function Configure-Firewall {
     Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppHost" -Name "EnableWebContentEvaluation" -Value 0
 
     Write-Host "[!] Windows Defender App & Browser Control disabled"
+
+    # Add vulnerable service ports
+    New-NetFirewallRule -DisplayName "Vulnerable_Services" -Direction Inbound -LocalPort @(21,23,135,139,445,3389) -Protocol TCP -Action Allow
+
+    # Disable Windows Defender completely
+    Set-MpPreference -DisableRealtimeMonitoring $true
+    Set-MpPreference -DisableArchiveScanning $true
+    Set-MpPreference -DisableBehaviorMonitoring $true
+    Set-MpPreference -DisableBlockAtFirstSeen $true
 }
 
 function Create-ExampleFiles {
@@ -141,30 +205,31 @@ try {
     Configure-Firewall
     Create-ExampleFiles
 
+    Configure-SSH-Vulnerabilities
+    Configure-SMB-Vulnerabilities
+    Configure-RDP-Vulnerabilities
+
     Write-Host @"
-=== Lab Setup Complete ===
-Lab Location: $labBase
-Test IP: $testIP
-Python Version: $(python --version)
+=== Created Intentional Vulnerabilities ===
+1. SSH:
+   - Root login enabled
+   - Password authentication enabled
+   - Default credentials: labuser/Password123
 
-Safety Scripts:
-- LabReset.ps1: $labBase\Tools\LabReset.ps1
-- StartMonitoring.ps1: $labBase\Tools\StartMonitoring.ps1
+2. SMB:
+   - SMBv1 enabled
+   - Open share at \\localhost\VULNERABLE_SHARE
+   - Guest access allowed
 
-Additional Configurations:
-- SMB/RDP/SSH ports open
-- Windows Defender App & Browser Control disabled
-- PsExec installed in Tools directory
-- Defender exclusions for lab directory
+3. RDP:
+   - Network Level Authentication disabled
+   - Weak encryption enabled
+   - Saved credentials allowed
 
-Next Steps:
-1. Review created files
-2. Test Python environments
-3. Start monitoring script
-4. Begin controlled experiments
-
-WARNING: This environment is intentionally vulnerable!
-Do NOT use for real systems or sensitive data.
+4. Additional Vulnerabilities:
+   - Telnet server enabled
+   - PUTTY installed with saved sessions
+   - Firewall ports 21/23/135/139 open
 "@
 }
 catch {
