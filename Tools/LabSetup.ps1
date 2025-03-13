@@ -37,7 +37,16 @@ function Initialize-Lab {
     # Install required system features
     Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart
     Enable-WindowsOptionalFeature -Online -FeatureName Containers -All -NoRestart
-    Enable-WindowsOptionalFeature -Online -FeatureName OpenSSH.Server -All -NoRestart
+
+    # Correct OpenSSH Server installation
+    try {
+        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
+        Start-Service sshd
+        Set-Service -Name sshd -StartupType Automatic
+    }
+    catch {
+        Write-Warning "OpenSSH Server installation failed: $_"
+    }
 }
 
 function Install-LabDependencies {
