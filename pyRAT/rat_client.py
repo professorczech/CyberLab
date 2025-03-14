@@ -68,7 +68,9 @@ class RatC2(cmd.Cmd):
         """Handle incoming connections with protocol handshake"""
         while self.running:
             try:
+                print(f"[*] Listening on {self.listener.getsockname()}")
                 client, addr = self.listener.accept()
+                print(f"[+] Incoming connection from {addr}")
                 client.settimeout(10)
 
                 # Receive session ID
