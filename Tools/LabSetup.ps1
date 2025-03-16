@@ -167,7 +167,7 @@ function Install-LabDependencies {
     Write-Host "[*] Installing Python packages..."
     try {
         python -m pip install --upgrade pip
-        python -m pip install keyboard paramiko cryptography pyautogui psutil pillow zstandard
+        python -m pip install keyboard paramiko cryptography pyautogui psutil pillow zstandard mss pyautogui tkinter
     }
     catch {
         Write-Warning "Python package installation failed: $_"

