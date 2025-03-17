@@ -9,8 +9,8 @@ from collections import deque
 from datetime import datetime
 
 # Configuration
-HOST = '127.0.0.1'
-PORT = 4444
+HOST = '192.168.100.15'
+PORT = 4445
 BUFFER_THRESHOLD = 20  # Characters before sending
 MAX_DELAY = 2.0  # Maximum seconds between sends
 RECONNECT_BASE_DELAY = 1.0
