@@ -5,7 +5,7 @@ import json
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!'  # 32 characters = 32 bytes
+ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!!'  # 32 characters = 32 bytes
 PORT = 4445
 
 

