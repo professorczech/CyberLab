@@ -5,14 +5,22 @@ import json
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-ENCRYPTION_KEY = b'this-is-a-32-byte-key-for-aes-256!!'  # 32 characters
+ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!'  # 32 characters = 32 bytes
 PORT = 4445
 
 
 def decrypt_data(encrypted_data):
-    """Proper AES-256-CBC decryption"""
+    """Proper decryption with key validation"""
     from cryptography.hazmat.primitives import padding
 
+    # Validate key first
+    if len(ENCRYPTION_KEY) not in {16, 24, 32}:
+        raise ValueError(
+            f"Invalid key length {len(ENCRYPTION_KEY)}. "
+            "Key must be 16, 24, or 32 bytes long."
+        )
+
+    # Extract IV and decrypt
     iv = encrypted_data[:16]
     ciphertext = encrypted_data[16:]
 

